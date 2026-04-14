@@ -187,6 +187,11 @@
                             <input type="number" id="aiTemperature" class="input-number"
                                    value="0.85" min="0" max="2" step="0.1">
                         </div>
+                        <div class="setting-group">
+                            <label>额外 AI 指令</label>
+                            <textarea id="customPrompt" class="input-text input-textarea"
+                                      placeholder="例如：保留学术风格，避免口语化，重点保留法条和变量名"></textarea>
+                        </div>
                         <button class="btn btn-small btn-test" id="testLlmBtn">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -198,6 +203,31 @@
                     </div>
                 </section>
 
+                <section class="card" id="advancedReduceSection">
+                    <div class="card-header">
+                        <span class="step-num">4</span>
+                        <h3>高级降重设置</h3>
+                    </div>
+                    <div class="setting-group">
+                        <label>术语保护库</label>
+                        <textarea id="protectedWords" class="input-text input-textarea"
+                                  placeholder="每行一个，或用逗号分隔，例如：&#10;深度学习&#10;梯度下降&#10;Transformer"></textarea>
+                        <div class="input-hint">这些术语会在降重前用占位符保护，完成后自动恢复。</div>
+                    </div>
+                    <div class="setting-group">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="hybridMode">
+                            <span>混合降重开关</span>
+                        </label>
+                        <div class="input-hint">仅对高风险段落使用 AI；低风险段落仍走规则引擎。</div>
+                    </div>
+                </section>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                                <polyline points="22 4 12 14.01 9 11.01"/>
+                            </svg>
+                            测试连接
+                        </button>
                 <!-- 操作按钮 -->
                 <div class="action-buttons">
                     <button class="btn btn-primary" id="analyzeBtn" disabled>

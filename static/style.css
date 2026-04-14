@@ -752,6 +752,12 @@ input[type="checkbox"] {
 .input-text:focus { border-color: var(--primary); }
 .input-text::placeholder { color: var(--text-muted); }
 
+.input-textarea {
+    min-height: 88px;
+    resize: vertical;
+    line-height: 1.5;
+}
+
 .input-hint {
     font-size: 11px;
     color: var(--text-muted);

@@ -209,11 +209,13 @@ async function runReduce() {
     }
 
     const aiConfig = getAIConfig();
+    const protectedWords = getProtectedWords();
+    const hybridMode = $('#hybridMode').checked;
     saveAIConfig();
 
-    setStatus('working', '降重中...');
+    setStatus('working', hybridMode ? '混合降重中...' : '降重中...');
     showLoading(`正在处理 ${selected.length} 个段落...`);
-    startProgress(selected.length, '规则降重进行中');
+    startProgress(selected.length, hybridMode ? '混合降重进行中' : '规则降重进行中');
     pollProgress(state.sessionId);
 
     try {
@@ -225,6 +227,8 @@ async function runReduce() {
                 level: state.level,
                 selected_indices: selected,
                 ai_config: aiConfig,
+                protected_words: protectedWords,
+                hybrid_mode: hybridMode,
             }),
         });
         const data = await res.json();
@@ -236,7 +240,8 @@ async function runReduce() {
         $('#resultsArea').style.display = 'none';
         $('#reduceResult').style.display = 'block';
 
-        setStatus('active', `完成! 修改了 ${data.modified_count} 个段落`);
+        const modeText = data.hybrid_mode ? '混合降重' : '规则降重';
+        setStatus('active', `${modeText}完成! 修改了 ${data.modified_count} 个段落`);
     } catch (err) {
         alert('降重失败: ' + err.message);
         setStatus('', '降重失败');
@@ -335,6 +340,7 @@ async function toggleExpand(item, para) {
                         text: para.full_text,
                         level: state.level,
                         risk_level: para.risk_level,
+                        protected_words: getProtectedWords(),
                     }),
                 });
                 const data = await res.json();
@@ -482,7 +488,16 @@ function getAIConfig() {
         api_url: $('#apiUrl').value.trim() || 'https://api.openai.com/v1',
         model: $('#aiModel').value.trim() || 'gpt-3.5-turbo',
         temperature: parseFloat($('#aiTemperature').value || '0.85') || 0.85,
+        custom_prompt: $('#customPrompt').value.trim(),
     };
+}
+
+function getProtectedWords() {
+    return ($('#protectedWords').value || '')
+        .replace(/，/g, ',')
+        .split(/[\n,]/)
+        .map(item => item.trim())
+        .filter(Boolean);
 }
 
 function saveAIConfig() {
@@ -492,6 +507,9 @@ function saveAIConfig() {
         localStorage.setItem('aigc_ai_key', cfg.api_key);
         localStorage.setItem('aigc_ai_model', cfg.model);
         localStorage.setItem('aigc_ai_temperature', String(cfg.temperature));
+        localStorage.setItem('aigc_ai_custom_prompt', cfg.custom_prompt || '');
+        localStorage.setItem('aigc_protected_words', $('#protectedWords').value || '');
+        localStorage.setItem('aigc_hybrid_mode', $('#hybridMode').checked ? '1' : '0');
     } catch {}
 }
 
@@ -501,10 +519,16 @@ function loadAIConfig() {
         const key = localStorage.getItem('aigc_ai_key');
         const model = localStorage.getItem('aigc_ai_model');
         const temperature = localStorage.getItem('aigc_ai_temperature');
+        const customPrompt = localStorage.getItem('aigc_ai_custom_prompt');
+        const protectedWords = localStorage.getItem('aigc_protected_words');
+        const hybridMode = localStorage.getItem('aigc_hybrid_mode');
         if (url) $('#apiUrl').value = url;
         if (key) $('#apiKey').value = key;
         if (model) $('#aiModel').value = model;
         if (temperature) $('#aiTemperature').value = temperature;
+        if (customPrompt) $('#customPrompt').value = customPrompt;
+        if (protectedWords) $('#protectedWords').value = protectedWords;
+        $('#hybridMode').checked = hybridMode === '1';
     } catch {}
 }
 
@@ -581,6 +605,7 @@ async function runAIReduce() {
             body: JSON.stringify({
                 session_id: state.sessionId,
                 selected_indices: selected,
+                protected_words: getProtectedWords(),
                 ...cfg,
             }),
         });

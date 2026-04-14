@@ -21,7 +21,7 @@ from doc_handler import (
     get_content_paragraphs, analyze_document,
 )
 from transformer import (
-    Transformer, AITransformer,
+    Transformer, AITransformer, TransformResult,
     analyze_ai_patterns, get_strategy_description,
 )
 
@@ -49,6 +49,7 @@ def _normalize_ai_config(raw: dict | None) -> dict:
     ).strip()
     api_key = str(raw.get('api_key') or '').strip()
     model = str(raw.get('model') or raw.get('model_name') or 'gpt-3.5-turbo').strip()
+    custom_prompt = str(raw.get('custom_prompt') or '').strip()
 
     temperature = raw.get('temperature', 0.85)
     try:
@@ -62,7 +63,25 @@ def _normalize_ai_config(raw: dict | None) -> dict:
         'api_key': api_key,
         'model': model,
         'temperature': temperature,
+        'custom_prompt': custom_prompt,
     }
+
+
+def _normalize_protected_words(raw) -> list[str]:
+    """归一化术语保护列表。"""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        parts = raw.replace('，', ',').replace('\n', ',').split(',')
+    else:
+        parts = raw
+
+    result = []
+    for item in parts:
+        word = str(item or '').strip()
+        if word and word not in result:
+            result.append(word)
+    return result
 
 
 def _json_error(message: str, status: int = 400, error: dict | None = None):
@@ -266,7 +285,11 @@ def preview():
         return jsonify({'error': '文本为空'}), 400
 
     transformer = Transformer(aggressiveness=level)
-    result = transformer.transform(text, risk)
+    result = transformer.transform(
+        text,
+        risk,
+        protected_words=_normalize_protected_words(data.get('protected_words')),
+    )
 
     return jsonify({
         'original': result.original,
@@ -278,7 +301,7 @@ def preview():
 
 @app.route('/api/reduce', methods=['POST'])
 def reduce():
-    """执行降重并生成文档。支持接收 ai_config 以透传 AI 配置。"""
+    """执行降重并生成文档，支持混合模式与术语保护。"""
     data = request.get_json() or {}
     sid = data.get('session_id')
     if not sid or sid not in sessions:
@@ -288,6 +311,8 @@ def reduce():
     selected_indices = data.get('selected_indices', None)
     custom_replacements = data.get('custom_replacements', {})
     ai_config = _normalize_ai_config(data.get('ai_config'))
+    protected_words = _normalize_protected_words(data.get('protected_words'))
+    hybrid_mode = bool(data.get('hybrid_mode'))
 
     doc, paragraphs = read_docx(sessions[sid]['doc_path'])
 
@@ -295,6 +320,7 @@ def reduce():
     if not analysis:
         return _json_error('请先执行分析')
 
+    analysis_map = {item['index']: item for item in analysis}
     targets = {}
     risk_map = {}
     for item in analysis:
@@ -302,30 +328,82 @@ def reduce():
         if selected_indices is not None and idx not in selected_indices:
             continue
         targets[idx] = item['full_text']
-        risk_map[idx] = item['risk_level']
+        risk_map[idx] = item.get('report_risk') or item['risk_level']
 
-    _init_progress(sid, len(targets), '规则降重进行中')
+    if not targets:
+        return _json_error('没有可处理的段落')
 
-    transformer = Transformer(aggressiveness=level)
+    use_hybrid = hybrid_mode and bool(sessions[sid].get('report_data'))
+    if use_hybrid and not ai_config['api_key']:
+        return _json_error('混合模式需要提供 API Key')
+
+    _init_progress(sid, len(targets), '混合降重进行中' if use_hybrid else '规则降重进行中')
+
+    rule_transformer = Transformer(aggressiveness=2 if use_hybrid else level)
+    ai_transformer = AITransformer(api_config=ai_config) if use_hybrid else None
+
     results = []
-    for current, (idx, text) in enumerate(targets.items(), start=1):
-        level_name = risk_map.get(idx, 'medium')
-        result = transformer.transform(text, level_name)
+    errors = []
+    processed = 0
+
+    for idx, text in targets.items():
+        risk_level = risk_map.get(idx, 'low')
+        processed += 1
+
+        if use_hybrid:
+            if risk_level in ('high', 'medium'):
+                result = ai_transformer.transform(
+                    text,
+                    risk_level,
+                    protected_words=protected_words,
+                    custom_prompt=ai_config.get('custom_prompt', ''),
+                )
+                mode = 'ai'
+            elif risk_level == 'low':
+                result = rule_transformer.transform(
+                    text,
+                    'medium',
+                    protected_words=protected_words,
+                )
+                mode = 'rule'
+            else:
+                result = TransformResult(
+                    paragraph_index=idx,
+                    original=text,
+                    transformed=text,
+                    rules_applied=[],
+                    change_ratio=0,
+                )
+                mode = 'skip'
+        else:
+            result = rule_transformer.transform(
+                text,
+                risk_level,
+                protected_words=protected_words,
+            )
+            mode = 'rule'
+
         result.paragraph_index = idx
-        results.append(result)
-        _update_progress(sid, current)
+        results.append((mode, result))
+        _update_progress(sid, processed)
 
     applied = []
-    for result in results:
+    for mode, result in results:
         idx = result.paragraph_index
+        if result.error:
+            errors.append({'index': idx, 'error': result.error})
+            continue
+
         new_text = custom_replacements.get(str(idx), result.transformed)
+        if mode == 'skip' and str(idx) not in custom_replacements:
+            continue
         if result.rules_applied or str(idx) in custom_replacements:
             replace_paragraph_text(doc, idx, new_text)
             applied.append({
                 'index': idx,
                 'original': result.original[:100],
                 'transformed': new_text[:100],
-                'rules': result.rules_applied,
+                'rules': result.rules_applied + ([f'模式: {mode}'] if mode != 'skip' else ['模式: 跳过']),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -340,22 +418,36 @@ def reduce():
         'api_url': ai_config['api_url'],
         'model': ai_config['model'],
         'temperature': ai_config['temperature'],
+        'custom_prompt': ai_config['custom_prompt'],
         'has_api_key': bool(ai_config['api_key']),
     }
-    _update_progress(sid, len(targets), label='规则降重已完成', done=True)
+    sessions[sid]['last_reduce_options'] = {
+        'protected_words': protected_words,
+        'hybrid_mode': use_hybrid,
+    }
+    _update_progress(sid, len(targets), label='降重已完成', done=True)
+
+    status = 200
+    if errors and not applied:
+        status = errors[0].get('error', {}).get('status', 502) or 502
 
     return jsonify({
         'success': True,
         'modified_count': len(applied),
+        'error_count': len(errors),
         'details': applied,
+        'errors': errors,
         'download_url': f'/api/download/{sid}',
+        'hybrid_mode': use_hybrid,
+        'protected_words_count': len(protected_words),
         'ai_config_received': {
             'api_url': ai_config['api_url'],
             'model': ai_config['model'],
             'temperature': ai_config['temperature'],
+            'custom_prompt': ai_config['custom_prompt'],
             'has_api_key': bool(ai_config['api_key']),
         },
-    })
+    }), status
 
 
 @app.route('/api/download/<sid>')
@@ -396,7 +488,12 @@ def ai_preview():
         return _json_error('文本为空')
 
     ai = AITransformer(api_config=ai_config)
-    result = ai.transform(text, risk)
+    result = ai.transform(
+        text,
+        risk,
+        protected_words=_normalize_protected_words(data.get('protected_words')),
+        custom_prompt=ai_config.get('custom_prompt', ''),
+    )
 
     if result.error:
         status = result.error.get('status', 502) or 502
@@ -427,6 +524,7 @@ def ai_reduce():
 
     selected_indices = data.get('selected_indices', None)
     ai_config = _normalize_ai_config(data)
+    protected_words = _normalize_protected_words(data.get('protected_words'))
 
     if not ai_config['api_key']:
         return _json_error('API Key 不能为空')
@@ -451,7 +549,12 @@ def ai_reduce():
     results = []
     for current, (idx, text) in enumerate(targets.items(), start=1):
         level_name = risk_map.get(idx, 'medium')
-        result = ai.transform(text, level_name)
+        result = ai.transform(
+            text,
+            level_name,
+            protected_words=protected_words,
+            custom_prompt=ai_config.get('custom_prompt', ''),
+        )
         result.paragraph_index = idx
         results.append(result)
         _update_progress(sid, current)

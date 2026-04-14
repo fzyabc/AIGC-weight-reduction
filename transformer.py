@@ -129,13 +129,50 @@ class Transformer:
         self.aggressiveness = aggressiveness
         self._used_markers = set()
 
-    def transform(self, text: str, risk_level: str = 'medium') -> TransformResult:
+    def protect_keywords(self, text: str,
+                         protected_words: Optional[list[str]] = None) -> tuple[str, dict[str, str]]:
+        """将指定术语替换为占位符，避免改写时被误伤。"""
+        if not text or not protected_words:
+            return text, {}
+
+        normalized = []
+        for word in protected_words:
+            w = str(word or '').strip()
+            if w and w not in normalized:
+                normalized.append(w)
+
+        normalized.sort(key=len, reverse=True)
+        protected_text = text
+        placeholder_map: dict[str, str] = {}
+
+        for word in normalized:
+            if word not in protected_text:
+                continue
+            token = f'[KEYWORD_{len(placeholder_map)}]'
+            protected_text = re.sub(re.escape(word), token, protected_text)
+            placeholder_map[token] = word
+
+        return protected_text, placeholder_map
+
+    def restore_keywords(self, text: str, placeholder_map: Optional[dict[str, str]] = None) -> str:
+        """将占位符还原为原始术语。"""
+        if not text or not placeholder_map:
+            return text
+
+        restored = text
+        for token, word in placeholder_map.items():
+            restored = restored.replace(token, word)
+        return restored
+
+    def transform(self, text: str, risk_level: str = 'medium',
+                  protected_words: Optional[list[str]] = None) -> TransformResult:
         """
         对单段文本进行降重变换。
 
         Args:
             text: 原始段落文本
             risk_level: 风险等级 ('high', 'medium', 'low')
+            protected_words: 需要保护的术语列表
         """
         if len(text.strip()) < 15:
             return TransformResult(
@@ -147,7 +184,11 @@ class Transformer:
             )
 
         rules_applied = []
-        result = text
+        protected_text, placeholder_map = self.protect_keywords(text, protected_words)
+        result = protected_text
+
+        if placeholder_map:
+            rules_applied.append(f'术语保护 × {len(placeholder_map)}')
 
         result, applied = self._replace_sequence_connectors(result)
         rules_applied.extend(applied)
@@ -167,6 +208,7 @@ class Transformer:
             result, applied = self._restructure_sentences(result)
             rules_applied.extend(applied)
 
+        result = self.restore_keywords(result, placeholder_map)
         change_ratio = 1 - _text_overlap(text, result)
 
         return TransformResult(
@@ -365,8 +407,10 @@ class AITransformer:
             self.temperature = float(temperature)
         self.temperature = max(0.0, min(2.0, self.temperature))
 
-    def transform(self, text: str, risk_level: str = 'medium') -> TransformResult:
-        """改写单段文本，失败时返回结构化错误。"""
+    def transform(self, text: str, risk_level: str = 'medium',
+                  protected_words: Optional[list[str]] = None,
+                  custom_prompt: str = '') -> TransformResult:
+        """改写单段文本，支持术语保护和额外 AI 指令。"""
         if len(text.strip()) < 15:
             return TransformResult(
                 paragraph_index=-1, original=text, transformed=text,
@@ -378,9 +422,11 @@ class AITransformer:
             'medium': '这段AIGC检测概率中等（50-75%），请适度调整句式和用词。',
             'low': '这段AIGC检测概率偏低（30-50%），只需轻微调整表达即可。',
         }
-        user_msg = f"{intensity_hint.get(risk_level, '')}\n\n原文：\n{text}"
 
-        call_result = self._call_api(user_msg)
+        protected_text, placeholder_map = self.protect_keywords(text, protected_words)
+        user_msg = f"{intensity_hint.get(risk_level, '')}\n\n原文：\n{protected_text}"
+
+        call_result = self._call_api(user_msg, custom_prompt=custom_prompt)
         if not call_result.get('ok'):
             err = call_result.get('error', {})
             msg = err.get('message', 'unknown error')
@@ -393,23 +439,36 @@ class AITransformer:
                 error=err,
             )
 
-        result_text = call_result.get('content', '')
+        result_text = self.restore_keywords(call_result.get('content', ''), placeholder_map)
+        rules = [f'AI改写 ({self.model})']
+        if placeholder_map:
+            rules.insert(0, f'术语保护 × {len(placeholder_map)}')
+        if custom_prompt.strip():
+            rules.append('附加提示词')
+
         change_ratio = 1 - _text_overlap(text, result_text)
         return TransformResult(
             paragraph_index=-1,
             original=text,
             transformed=result_text,
-            rules_applied=[f'AI改写 ({self.model})'],
+            rules_applied=rules,
             change_ratio=change_ratio,
         )
 
     def batch_transform(self, paragraphs: dict[int, str],
-                        risk_map: Optional[dict] = None) -> list[TransformResult]:
-        """批量改写段落。"""
+                        risk_map: Optional[dict] = None,
+                        protected_words: Optional[list[str]] = None,
+                        custom_prompt: str = '') -> list[TransformResult]:
+        """批量改写段落。采用串行调用，避免不必要的并发冲突。"""
         results = []
         for idx, text in paragraphs.items():
             level = risk_map.get(idx, 'medium') if risk_map else 'medium'
-            result = self.transform(text, level)
+            result = self.transform(
+                text,
+                level,
+                protected_words=protected_words,
+                custom_prompt=custom_prompt,
+            )
             result.paragraph_index = idx
             results.append(result)
         return results
@@ -553,12 +612,16 @@ class AITransformer:
                 },
             }
 
-    def _call_api(self, user_message: str) -> dict:
+    def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
+        system_prompt = self.SYSTEM_PROMPT
+        if custom_prompt.strip():
+            system_prompt = f"{system_prompt}\n\n附加要求：\n{custom_prompt.strip()}"
+
         payload = {
             'model': self.model,
             'messages': [
-                {'role': 'system', 'content': self.SYSTEM_PROMPT},
+                {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': user_message},
             ],
             'temperature': self.temperature,
