@@ -116,6 +116,7 @@ class TransformResult:
     transformed: str
     rules_applied: list[str]
     change_ratio: float  # 文本变化比例
+    error: Optional[dict] = None
 
 
 class Transformer:
@@ -324,7 +325,7 @@ def get_strategy_description(aggressiveness: int) -> str:
 class AITransformer:
     """
     基于LLM API的深度降重变换器。
-    兼容 OpenAI / DeepSeek / 通义千问 / 任何 OpenAI 兼容接口。
+    每次实例化时动态传入 API 配置，不依赖环境变量。
     """
 
     SYSTEM_PROMPT = (
@@ -341,17 +342,31 @@ class AITransformer:
         '直接输出改写后的段落，不要输出任何解释。'
     )
 
-    def __init__(self, api_key: str, api_url: str = "https://api.openai.com/v1",
-                 model: str = "gpt-4o-mini", temperature: float = 0.85):
-        self.api_key = api_key
-        self.api_url = api_url.rstrip('/')
-        if not self.api_url.endswith('/v1'):
-            if '/v1' not in self.api_url:
-                self.api_url += '/v1'
-        self.model = model
-        self.temperature = temperature
+    def __init__(self, api_config: Optional[dict] = None, *,
+                 api_key: str = '',
+                 api_url: str = "https://api.openai.com/v1",
+                 model: str = "gpt-3.5-turbo",
+                 temperature: float = 0.85):
+        """初始化 AI 变换器。"""
+        cfg = api_config or {}
+        self.api_key = str(cfg.get('api_key') or api_key or '').strip()
+
+        raw_url = str(cfg.get('api_url') or api_url or '').strip() or 'https://api.openai.com/v1'
+        self.api_url = raw_url.rstrip('/')
+        if not self.api_url.endswith('/v1') and '/v1' not in self.api_url:
+            self.api_url += '/v1'
+
+        self.model = str(cfg.get('model') or model or 'gpt-3.5-turbo').strip()
+
+        raw_temp = cfg.get('temperature', temperature)
+        try:
+            self.temperature = float(raw_temp)
+        except (TypeError, ValueError):
+            self.temperature = float(temperature)
+        self.temperature = max(0.0, min(2.0, self.temperature))
 
     def transform(self, text: str, risk_level: str = 'medium') -> TransformResult:
+        """改写单段文本，失败时返回结构化错误。"""
         if len(text.strip()) < 15:
             return TransformResult(
                 paragraph_index=-1, original=text, transformed=text,
@@ -365,27 +380,32 @@ class AITransformer:
         }
         user_msg = f"{intensity_hint.get(risk_level, '')}\n\n原文：\n{text}"
 
-        try:
-            result_text = self._call_api(user_msg)
-            change_ratio = 1 - _text_overlap(text, result_text)
-            return TransformResult(
-                paragraph_index=-1,
-                original=text,
-                transformed=result_text,
-                rules_applied=[f'AI改写 ({self.model})'],
-                change_ratio=change_ratio,
-            )
-        except Exception as e:
+        call_result = self._call_api(user_msg)
+        if not call_result.get('ok'):
+            err = call_result.get('error', {})
+            msg = err.get('message', 'unknown error')
             return TransformResult(
                 paragraph_index=-1,
                 original=text,
                 transformed=text,
-                rules_applied=[f'AI调用失败: {str(e)[:80]}'],
+                rules_applied=[f'AI调用失败: {msg[:80]}'],
                 change_ratio=0,
+                error=err,
             )
+
+        result_text = call_result.get('content', '')
+        change_ratio = 1 - _text_overlap(text, result_text)
+        return TransformResult(
+            paragraph_index=-1,
+            original=text,
+            transformed=result_text,
+            rules_applied=[f'AI改写 ({self.model})'],
+            change_ratio=change_ratio,
+        )
 
     def batch_transform(self, paragraphs: dict[int, str],
                         risk_map: Optional[dict] = None) -> list[TransformResult]:
+        """批量改写段落。"""
         results = []
         for idx, text in paragraphs.items():
             level = risk_map.get(idx, 'medium') if risk_map else 'medium'
@@ -395,28 +415,147 @@ class AITransformer:
         return results
 
     def test_connection(self) -> dict:
-        """测试API连接是否正常，返回 {ok: bool, message: str, models: list}"""
-        try:
-            import urllib.request
-            import json as _json
+        """测试 API 连接并返回结构化结果。"""
+        if not self.api_key:
+            return {
+                'ok': False,
+                'message': 'API Key 不能为空',
+                'models': [],
+                'error': {
+                    'code': 'missing_api_key',
+                    'status': 400,
+                    'message': 'API Key 不能为空',
+                },
+            }
 
-            url = self.api_url + '/models'
-            req = urllib.request.Request(url, headers={
-                'Authorization': f'Bearer {self.api_key}',
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = _json.loads(resp.read().decode())
-            model_ids = [m.get('id', '') for m in data.get('data', [])][:20]
-            return {'ok': True, 'message': '连接成功', 'models': model_ids}
-        except Exception as e:
-            return {'ok': False, 'message': str(e)[:200], 'models': []}
+        result = self._request_json('/models', timeout=10)
+        if not result.get('ok'):
+            err = result.get('error', {})
+            return {
+                'ok': False,
+                'message': err.get('message', '连接失败'),
+                'models': [],
+                'error': err,
+            }
 
-    def _call_api(self, user_message: str) -> str:
-        import urllib.request
+        data = result.get('data', {})
+        model_ids = [m.get('id', '') for m in data.get('data', []) if isinstance(m, dict)][:20]
+        return {
+            'ok': True,
+            'message': '连接成功',
+            'models': model_ids,
+            'error': None,
+        }
+
+    def _build_http_error(self, status: int, message: str,
+                          *, retry_after: Optional[str] = None,
+                          provider_code: str = '') -> dict:
+        """构建结构化 HTTP 错误。"""
+        if status == 401:
+            code = 'unauthorized'
+        elif status == 429:
+            code = 'rate_limited'
+        elif status >= 500:
+            code = 'upstream_server_error'
+        else:
+            code = 'http_error'
+
+        err = {
+            'code': code,
+            'status': status,
+            'message': message,
+        }
+        if retry_after:
+            err['retry_after'] = retry_after
+        if provider_code:
+            err['provider_code'] = provider_code
+        return err
+
+    def _request_json(self, endpoint: str,
+                      payload: Optional[dict] = None,
+                      timeout: int = 60) -> dict:
+        """发送 JSON 请求并返回结构化结果。"""
         import json as _json
+        import urllib.error
+        import urllib.request
 
-        url = self.api_url + '/chat/completions'
-        payload = _json.dumps({
+        url = self.api_url + endpoint
+        data = None
+        method = 'GET'
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+        }
+
+        if payload is not None:
+            method = 'POST'
+            data = _json.dumps(payload).encode('utf-8')
+            headers['Content-Type'] = 'application/json'
+
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode('utf-8', errors='ignore')
+                try:
+                    parsed = _json.loads(raw) if raw else {}
+                except Exception:
+                    parsed = {'raw': raw}
+                return {
+                    'ok': True,
+                    'status': getattr(resp, 'status', 200),
+                    'data': parsed,
+                }
+        except urllib.error.HTTPError as e:
+            body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+            provider_msg = body.strip() or str(e)
+            provider_code = ''
+            try:
+                parsed = _json.loads(body) if body else {}
+                provider_msg = (
+                    parsed.get('error', {}).get('message')
+                    or parsed.get('message')
+                    or provider_msg
+                )
+                provider_code = (
+                    parsed.get('error', {}).get('code')
+                    or parsed.get('code')
+                    or ''
+                )
+            except Exception:
+                pass
+
+            retry_after = e.headers.get('Retry-After') if e.headers else None
+            return {
+                'ok': False,
+                'error': self._build_http_error(
+                    e.code,
+                    provider_msg[:220],
+                    retry_after=retry_after,
+                    provider_code=provider_code,
+                ),
+            }
+        except urllib.error.URLError as e:
+            return {
+                'ok': False,
+                'error': {
+                    'code': 'network_error',
+                    'status': 0,
+                    'message': str(e.reason)[:220],
+                },
+            }
+        except Exception as e:
+            return {
+                'ok': False,
+                'error': {
+                    'code': 'unexpected_error',
+                    'status': 0,
+                    'message': str(e)[:220],
+                },
+            }
+
+    def _call_api(self, user_message: str) -> dict:
+        """调用 /chat/completions 接口并返回结构化结果。"""
+        payload = {
             'model': self.model,
             'messages': [
                 {'role': 'system', 'content': self.SYSTEM_PROMPT},
@@ -424,17 +563,29 @@ class AITransformer:
             ],
             'temperature': self.temperature,
             'max_tokens': 4096,
-        }).encode()
+        }
 
-        req = urllib.request.Request(url, data=payload, headers={
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.api_key}',
-        })
+        result = self._request_json('/chat/completions', payload=payload, timeout=60)
+        if not result.get('ok'):
+            return result
 
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = _json.loads(resp.read().decode())
-
-        return data['choices'][0]['message']['content'].strip()
+        data = result.get('data', {})
+        try:
+            content = data['choices'][0]['message']['content'].strip()
+            return {
+                'ok': True,
+                'content': content,
+                'error': None,
+            }
+        except Exception:
+            return {
+                'ok': False,
+                'error': {
+                    'code': 'invalid_response',
+                    'status': result.get('status', 200),
+                    'message': '模型返回格式异常，缺少 choices.message.content',
+                },
+            }
 
 
 def analyze_ai_patterns(text: str) -> dict:

@@ -12,6 +12,11 @@ const state = {
     selectedIndices: new Set(),
     round: 1,
     aiEnabled: false,
+    progress: {
+        current: 0,
+        total: 0,
+        timer: null,
+    },
 };
 
 // ============================================================
@@ -203,8 +208,13 @@ async function runReduce() {
         return;
     }
 
+    const aiConfig = getAIConfig();
+    saveAIConfig();
+
     setStatus('working', '降重中...');
     showLoading(`正在处理 ${selected.length} 个段落...`);
+    startProgress(selected.length, '规则降重进行中');
+    pollProgress(state.sessionId);
 
     try {
         const res = await fetch('/api/reduce', {
@@ -214,11 +224,13 @@ async function runReduce() {
                 session_id: state.sessionId,
                 level: state.level,
                 selected_indices: selected,
+                ai_config: aiConfig,
             }),
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
+        finishProgress(selected.length, selected.length, '规则降重已完成');
         renderReduceResult(data);
 
         $('#resultsArea').style.display = 'none';
@@ -229,6 +241,7 @@ async function runReduce() {
         alert('降重失败: ' + err.message);
         setStatus('', '降重失败');
     } finally {
+        stopProgress();
         hideLoading();
     }
 }
@@ -467,7 +480,8 @@ function getAIConfig() {
     return {
         api_key: $('#apiKey').value.trim(),
         api_url: $('#apiUrl').value.trim() || 'https://api.openai.com/v1',
-        model: $('#aiModel').value.trim() || 'gpt-4o-mini',
+        model: $('#aiModel').value.trim() || 'gpt-3.5-turbo',
+        temperature: parseFloat($('#aiTemperature').value || '0.85') || 0.85,
     };
 }
 
@@ -477,6 +491,7 @@ function saveAIConfig() {
         localStorage.setItem('aigc_ai_url', cfg.api_url);
         localStorage.setItem('aigc_ai_key', cfg.api_key);
         localStorage.setItem('aigc_ai_model', cfg.model);
+        localStorage.setItem('aigc_ai_temperature', String(cfg.temperature));
     } catch {}
 }
 
@@ -485,9 +500,11 @@ function loadAIConfig() {
         const url = localStorage.getItem('aigc_ai_url');
         const key = localStorage.getItem('aigc_ai_key');
         const model = localStorage.getItem('aigc_ai_model');
+        const temperature = localStorage.getItem('aigc_ai_temperature');
         if (url) $('#apiUrl').value = url;
         if (key) $('#apiKey').value = key;
         if (model) $('#aiModel').value = model;
+        if (temperature) $('#aiTemperature').value = temperature;
     } catch {}
 }
 
@@ -505,7 +522,7 @@ async function testLLMConnection() {
     testResult.textContent = '测试中...';
 
     try {
-        const res = await fetch('/api/test-llm', {
+        const res = await fetch('/api/test_llm', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(cfg),
@@ -522,8 +539,9 @@ async function testLLMConnection() {
             statusEl.className = 'ai-status ok';
             saveAIConfig();
         } else {
+            const detail = data.error ? ` [${data.error.code || 'unknown'}]` : '';
             testResult.className = 'test-result fail';
-            testResult.textContent = `连接失败: ${data.message}`;
+            testResult.textContent = `连接失败${detail}: ${data.message}`;
             statusEl.textContent = '未连接';
             statusEl.className = 'ai-status fail';
         }
@@ -553,6 +571,8 @@ async function runAIReduce() {
     saveAIConfig();
     setStatus('working', 'AI降重中...');
     showLoading(`AI正在改写 ${selected.length} 个段落，可能需要较长时间...`);
+    startProgress(selected.length, 'AI 降重进行中');
+    pollProgress(state.sessionId);
 
     try {
         const res = await fetch('/api/ai-reduce', {
@@ -566,6 +586,8 @@ async function runAIReduce() {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
+
+        finishProgress(selected.length, selected.length, 'AI 降重已完成');
 
         let info = `AI改写 ${data.modified_count} 个段落`;
         if (data.error_count > 0) {
@@ -582,6 +604,7 @@ async function runAIReduce() {
         alert('AI降重失败: ' + err.message);
         setStatus('', 'AI降重失败');
     } finally {
+        stopProgress();
         hideLoading();
     }
 }
@@ -702,6 +725,67 @@ function showLoading(text) {
 
 function hideLoading() {
     $('#loading').style.display = 'none';
+}
+
+function startProgress(total, label = '处理中...') {
+    state.progress.current = 0;
+    state.progress.total = total;
+    if (state.progress.timer) {
+        clearInterval(state.progress.timer);
+        state.progress.timer = null;
+    }
+    $('#progressPanel').style.display = 'block';
+    $('#progressLabel').textContent = label;
+    updateProgress(0, total);
+}
+
+function updateProgress(current, total = state.progress.total) {
+    state.progress.current = current;
+    state.progress.total = total;
+    const safeTotal = Math.max(total, 1);
+    const percent = Math.max(0, Math.min(100, (current / safeTotal) * 100));
+    $('#progressText').textContent = `${current} / ${total}`;
+    $('#progressFill').style.width = `${percent}%`;
+}
+
+function finishProgress(current, total, label = '已完成') {
+    $('#progressLabel').textContent = label;
+    updateProgress(current, total);
+}
+
+function stopProgress() {
+    if (state.progress.timer) {
+        clearInterval(state.progress.timer);
+        state.progress.timer = null;
+    }
+    setTimeout(() => {
+        $('#progressPanel').style.display = 'none';
+        $('#progressFill').style.width = '0%';
+        $('#progressText').textContent = '0 / 0';
+    }, 300);
+}
+
+function pollProgress(sessionId) {
+    if (!sessionId) return;
+    if (state.progress.timer) {
+        clearInterval(state.progress.timer);
+    }
+
+    state.progress.timer = setInterval(async () => {
+        try {
+            const res = await fetch(`/api/progress/${sessionId}`);
+            const data = await res.json();
+            if (data.error) return;
+            $('#progressLabel').textContent = data.label || '处理中...';
+            updateProgress(data.current || 0, data.total || 0);
+            if (data.done) {
+                clearInterval(state.progress.timer);
+                state.progress.timer = null;
+            }
+        } catch {
+            // 忽略轮询瞬时错误
+        }
+    }, 350);
 }
 
 function escapeHtml(str) {

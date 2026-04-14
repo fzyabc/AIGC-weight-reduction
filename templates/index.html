@@ -152,7 +152,7 @@
                     </div>
                     <div class="ai-config" id="aiConfig" style="display:none">
                         <div class="setting-group">
-                            <label>API URL</label>
+                            <label>API Base URL</label>
                             <input type="text" id="apiUrl" class="input-text"
                                    value="https://api.openai.com/v1"
                                    placeholder="https://api.openai.com/v1">
@@ -172,15 +172,20 @@
                             </div>
                         </div>
                         <div class="setting-group">
-                            <label>模型</label>
+                            <label>Model Name</label>
                             <input type="text" id="aiModel" class="input-text"
-                                   value="gpt-4o-mini" placeholder="gpt-4o-mini">
+                                   value="gpt-3.5-turbo" placeholder="gpt-3.5-turbo">
                             <div class="model-presets">
+                                <button class="preset-btn" data-model="gpt-3.5-turbo">3.5</button>
                                 <button class="preset-btn" data-model="gpt-4o-mini">4o-mini</button>
-                                <button class="preset-btn" data-model="gpt-4o">4o</button>
                                 <button class="preset-btn" data-model="deepseek-chat">DeepSeek</button>
                                 <button class="preset-btn" data-model="qwen-plus">Qwen</button>
                             </div>
+                        </div>
+                        <div class="setting-group">
+                            <label>Temperature</label>
+                            <input type="number" id="aiTemperature" class="input-number"
+                                   value="0.85" min="0" max="2" step="0.1">
                         </div>
                         <button class="btn btn-small btn-test" id="testLlmBtn">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -303,6 +308,16 @@
                         </div>
                     </div>
                     <div class="change-list" id="changeList"></div>
+                </div>
+
+                <div class="progress-panel" id="progressPanel" style="display:none">
+                    <div class="progress-header">
+                        <span id="progressLabel">处理中...</span>
+                        <span id="progressText">0 / 0</span>
+                    </div>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill"></div>
+                    </div>
                 </div>
 
                 <!-- 加载中 -->

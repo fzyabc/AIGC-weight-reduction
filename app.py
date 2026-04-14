@@ -40,6 +40,66 @@ def _session_id():
     return str(uuid.uuid4())[:8]
 
 
+def _normalize_ai_config(raw: dict | None) -> dict:
+    """归一化前端传入的 AI 配置。"""
+    raw = raw or {}
+
+    api_url = str(
+        raw.get('api_url') or raw.get('api_base_url') or 'https://api.openai.com/v1'
+    ).strip()
+    api_key = str(raw.get('api_key') or '').strip()
+    model = str(raw.get('model') or raw.get('model_name') or 'gpt-3.5-turbo').strip()
+
+    temperature = raw.get('temperature', 0.85)
+    try:
+        temperature = float(temperature)
+    except (TypeError, ValueError):
+        temperature = 0.85
+    temperature = max(0.0, min(2.0, temperature))
+
+    return {
+        'api_url': api_url,
+        'api_key': api_key,
+        'model': model,
+        'temperature': temperature,
+    }
+
+
+def _json_error(message: str, status: int = 400, error: dict | None = None):
+    """返回统一的 JSON 错误响应。"""
+    payload = {'error': message}
+    if error:
+        payload['error_detail'] = error
+    return jsonify(payload), status
+
+
+def _init_progress(sid: str, total: int, label: str):
+    """初始化会话进度。"""
+    sessions[sid]['progress'] = {
+        'current': 0,
+        'total': total,
+        'label': label,
+        'done': False,
+    }
+
+
+def _update_progress(sid: str, current: int, *, label: str | None = None, done: bool = False):
+    """更新会话进度。"""
+    progress = sessions.get(sid, {}).get('progress')
+    if not progress:
+        return
+    progress['current'] = current
+    if label is not None:
+        progress['label'] = label
+    progress['done'] = done
+
+
+def _clear_progress(sid: str):
+    """清理会话进度。"""
+    if sid in sessions:
+        sessions[sid].pop('progress', None)
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -218,21 +278,22 @@ def preview():
 
 @app.route('/api/reduce', methods=['POST'])
 def reduce():
-    """执行降重并生成文档"""
+    """执行降重并生成文档。支持接收 ai_config 以透传 AI 配置。"""
     data = request.get_json() or {}
     sid = data.get('session_id')
     if not sid or sid not in sessions:
-        return jsonify({'error': '无效的会话ID'}), 400
+        return _json_error('无效的会话ID')
 
     level = data.get('level', 2)
     selected_indices = data.get('selected_indices', None)
     custom_replacements = data.get('custom_replacements', {})
+    ai_config = _normalize_ai_config(data.get('ai_config'))
 
     doc, paragraphs = read_docx(sessions[sid]['doc_path'])
 
     analysis = sessions[sid].get('analysis', [])
     if not analysis:
-        return jsonify({'error': '请先执行分析'}), 400
+        return _json_error('请先执行分析')
 
     targets = {}
     risk_map = {}
@@ -243,8 +304,16 @@ def reduce():
         targets[idx] = item['full_text']
         risk_map[idx] = item['risk_level']
 
+    _init_progress(sid, len(targets), '规则降重进行中')
+
     transformer = Transformer(aggressiveness=level)
-    results = transformer.batch_transform(targets, risk_map)
+    results = []
+    for current, (idx, text) in enumerate(targets.items(), start=1):
+        level_name = risk_map.get(idx, 'medium')
+        result = transformer.transform(text, level_name)
+        result.paragraph_index = idx
+        results.append(result)
+        _update_progress(sid, current)
 
     applied = []
     for result in results:
@@ -267,12 +336,25 @@ def reduce():
 
     sessions[sid]['output_path'] = out_path
     sessions[sid]['output_filename'] = f'{stem}_降重版.docx'
+    sessions[sid]['last_ai_config'] = {
+        'api_url': ai_config['api_url'],
+        'model': ai_config['model'],
+        'temperature': ai_config['temperature'],
+        'has_api_key': bool(ai_config['api_key']),
+    }
+    _update_progress(sid, len(targets), label='规则降重已完成', done=True)
 
     return jsonify({
         'success': True,
         'modified_count': len(applied),
         'details': applied,
         'download_url': f'/api/download/{sid}',
+        'ai_config_received': {
+            'api_url': ai_config['api_url'],
+            'model': ai_config['model'],
+            'temperature': ai_config['temperature'],
+            'has_api_key': bool(ai_config['api_key']),
+        },
     })
 
 
@@ -288,36 +370,44 @@ def download(sid):
     return send_file(path, as_attachment=True, download_name=name)
 
 
+@app.route('/api/test_llm', methods=['POST'])
 @app.route('/api/test-llm', methods=['POST'])
 def test_llm():
-    """测试LLM API连接"""
+    """测试 LLM API 连接。"""
     data = request.get_json() or {}
-    api_key = data.get('api_key', '')
-    api_url = data.get('api_url', 'https://api.openai.com/v1')
-    if not api_key:
-        return jsonify({'ok': False, 'message': 'API Key 不能为空', 'models': []})
-    ai = AITransformer(api_key=api_key, api_url=api_url)
+    ai_config = _normalize_ai_config(data)
+    ai = AITransformer(api_config=ai_config)
     result = ai.test_connection()
-    return jsonify(result)
+    status = 200 if result.get('ok') else result.get('error', {}).get('status', 400) or 400
+    return jsonify(result), status
 
 
 @app.route('/api/ai-preview', methods=['POST'])
 def ai_preview():
-    """AI预览单段降重效果"""
+    """AI 预览单段降重效果。"""
     data = request.get_json() or {}
-    api_key = data.get('api_key', '')
-    api_url = data.get('api_url', 'https://api.openai.com/v1')
-    model = data.get('model', 'gpt-4o-mini')
     text = data.get('text', '')
     risk = data.get('risk_level', 'medium')
+    ai_config = _normalize_ai_config(data)
 
-    if not api_key:
-        return jsonify({'error': 'API Key 不能为空'}), 400
+    if not ai_config['api_key']:
+        return _json_error('API Key 不能为空')
     if not text:
-        return jsonify({'error': '文本为空'}), 400
+        return _json_error('文本为空')
 
-    ai = AITransformer(api_key=api_key, api_url=api_url, model=model)
+    ai = AITransformer(api_config=ai_config)
     result = ai.transform(text, risk)
+
+    if result.error:
+        status = result.error.get('status', 502) or 502
+        return jsonify({
+            'error': result.error.get('message', 'AI 预览失败'),
+            'error_detail': result.error,
+            'original': result.original,
+            'transformed': result.transformed,
+            'rules_applied': result.rules_applied,
+            'change_ratio': round(result.change_ratio, 3),
+        }), status
 
     return jsonify({
         'original': result.original,
@@ -329,24 +419,22 @@ def ai_preview():
 
 @app.route('/api/ai-reduce', methods=['POST'])
 def ai_reduce():
-    """AI模式执行降重并生成文档"""
+    """AI 模式执行降重并生成文档。"""
     data = request.get_json() or {}
     sid = data.get('session_id')
     if not sid or sid not in sessions:
-        return jsonify({'error': '无效的会话ID'}), 400
+        return _json_error('无效的会话ID')
 
-    api_key = data.get('api_key', '')
-    api_url = data.get('api_url', 'https://api.openai.com/v1')
-    model = data.get('model', 'gpt-4o-mini')
     selected_indices = data.get('selected_indices', None)
+    ai_config = _normalize_ai_config(data)
 
-    if not api_key:
-        return jsonify({'error': 'API Key 不能为空'}), 400
+    if not ai_config['api_key']:
+        return _json_error('API Key 不能为空')
 
     doc, paragraphs = read_docx(sessions[sid]['doc_path'])
     analysis = sessions[sid].get('analysis', [])
     if not analysis:
-        return jsonify({'error': '请先执行分析'}), 400
+        return _json_error('请先执行分析')
 
     targets = {}
     risk_map = {}
@@ -357,17 +445,25 @@ def ai_reduce():
         targets[idx] = item['full_text']
         risk_map[idx] = item['risk_level']
 
-    ai = AITransformer(api_key=api_key, api_url=api_url, model=model)
-    results = ai.batch_transform(targets, risk_map)
+    _init_progress(sid, len(targets), 'AI 降重进行中')
+
+    ai = AITransformer(api_config=ai_config)
+    results = []
+    for current, (idx, text) in enumerate(targets.items(), start=1):
+        level_name = risk_map.get(idx, 'medium')
+        result = ai.transform(text, level_name)
+        result.paragraph_index = idx
+        results.append(result)
+        _update_progress(sid, current)
 
     applied = []
     errors = []
     for result in results:
         idx = result.paragraph_index
-        if any('失败' in r for r in result.rules_applied):
+        if result.error:
             errors.append({
                 'index': idx,
-                'error': result.rules_applied[0] if result.rules_applied else 'unknown',
+                'error': result.error,
             })
             continue
         if result.transformed != result.original:
@@ -388,6 +484,11 @@ def ai_reduce():
 
     sessions[sid]['output_path'] = out_path
     sessions[sid]['output_filename'] = f'{stem}_AI降重版.docx'
+    _update_progress(sid, len(targets), label='AI 降重已完成', done=True)
+
+    status = 200
+    if errors and not applied:
+        status = errors[0].get('error', {}).get('status', 502) or 502
 
     return jsonify({
         'success': True,
@@ -396,7 +497,7 @@ def ai_reduce():
         'details': applied,
         'errors': errors,
         'download_url': f'/api/download/{sid}',
-    })
+    }), status
 
 
 @app.route('/api/continue-reduce', methods=['POST'])
@@ -428,6 +529,21 @@ def continue_reduce():
         'round': sessions[sid]['round'],
         'stats': stats,
     })
+
+
+@app.route('/api/progress/<sid>')
+def progress(sid):
+    """获取当前会话处理进度。"""
+    if sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    progress_data = sessions[sid].get('progress') or {
+        'current': 0,
+        'total': 0,
+        'label': '暂无任务',
+        'done': True,
+    }
+    return jsonify(progress_data)
 
 
 @app.route('/api/reset', methods=['POST'])
