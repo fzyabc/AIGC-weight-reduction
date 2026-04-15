@@ -145,6 +145,19 @@ def _asset_version(*relative_parts: str) -> str:
         return str(int(time.time()))
 
 
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """全局异常处理: API 路由返回 JSON 而不是 HTML 错误页。"""
+    import traceback
+    traceback.print_exc()
+    if request.path.startswith('/api/'):
+        return _json_error(f'服务器内部错误: {e}', 500)
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    return f'Internal Server Error: {e}', 500
+
+
 @app.after_request
 def add_no_cache_headers(response):
     """开发态强制禁用缓存，避免前端静态资源或模板吃旧版本。"""
@@ -545,57 +558,71 @@ def test_llm():
 @app.route('/api/ai-preview', methods=['POST'])
 def ai_preview():
     """AI 预览单段降重效果。"""
-    data = request.get_json() or {}
-    text = data.get('text', '')
-    risk = data.get('risk_level', 'medium')
-    ai_config = _normalize_ai_config(data)
+    try:
+        data = request.get_json() or {}
+        text = data.get('text', '')
+        risk = data.get('risk_level', 'medium')
+        ai_config = _normalize_ai_config(data)
 
-    if not ai_config['api_key']:
-        return _json_error('API Key 不能为空')
-    if not text:
-        return _json_error('文本为空')
+        if not ai_config['api_key']:
+            return _json_error('API Key 不能为空')
+        if not text:
+            return _json_error('文本为空')
 
-    ai = AITransformer(api_config=ai_config)
-    protected_words = _normalize_protected_words(data.get('protected_words'))
-    result = ai.transform(
-        text,
-        risk,
-        protected_words=protected_words,
-        custom_prompt=ai_config.get('custom_prompt', ''),
-    )
+        ai = AITransformer(api_config=ai_config)
+        protected_words = _normalize_protected_words(data.get('protected_words'))
+        result = ai.transform(
+            text,
+            risk,
+            protected_words=protected_words,
+            custom_prompt=ai_config.get('custom_prompt', ''),
+        )
 
-    if result.error:
-        original_ai_error = result.error
-        fallback = Transformer(aggressiveness=3)
-        result = fallback.transform(text, risk, protected_words=protected_words)
-        result.rules_applied.append('AI失败后自动切换规则降重')
-        if original_ai_error:
-            code = original_ai_error.get('code', 'unknown')
-            msg = str(original_ai_error.get('message', ''))[:80]
-            result.rules_applied.append(f'AI错误: {code}')
-            if msg:
-                result.rules_applied.append(f'失败原因: {msg}')
+        if result.error:
+            original_ai_error = result.error
+            fallback = Transformer(aggressiveness=3)
+            result = fallback.transform(text, risk, protected_words=protected_words)
+            result.rules_applied.append('AI失败后自动切换规则降重')
+            if original_ai_error:
+                code = original_ai_error.get('code', 'unknown')
+                msg = str(original_ai_error.get('message', ''))[:80]
+                result.rules_applied.append(f'AI错误: {code}')
+                if msg:
+                    result.rules_applied.append(f'失败原因: {msg}')
+            return jsonify({
+                'original': result.original,
+                'transformed': result.transformed,
+                'rules_applied': result.rules_applied,
+                'change_ratio': round(result.change_ratio, 3),
+                'fallback': 'rule',
+                'fallback_message': '已自动转为规则降重',
+                'ai_error': original_ai_error,
+            })
+
         return jsonify({
             'original': result.original,
             'transformed': result.transformed,
             'rules_applied': result.rules_applied,
             'change_ratio': round(result.change_ratio, 3),
-            'fallback': 'rule',
-            'fallback_message': '已自动转为规则降重',
-            'ai_error': original_ai_error,
         })
-
-    return jsonify({
-        'original': result.original,
-        'transformed': result.transformed,
-        'rules_applied': result.rules_applied,
-        'change_ratio': round(result.change_ratio, 3),
-    })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return _json_error(f'AI预览异常: {e}', 500)
 
 
 @app.route('/api/ai-reduce', methods=['POST'])
 def ai_reduce():
     """AI 模式执行降重并生成文档。"""
+    try:
+        return _ai_reduce_inner()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return _json_error(f'AI降重异常: {e}', 500)
+
+
+def _ai_reduce_inner():
     data = request.get_json() or {}
     sid = data.get('session_id')
     if not sid or sid not in sessions:
