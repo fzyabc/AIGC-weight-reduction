@@ -434,6 +434,7 @@ def reduce():
                 'method': 'none' if mode == 'skip' else mode,
                 'risk_level': risk_map.get(idx, 'unknown'),
                 'is_low_confidence': bool(analysis_map.get(idx, {}).get('report_low_confidence', False)),
+                'fallback': mode == 'rule' and any('AI失败后自动切换规则降重' in str(rule) for rule in result.rules_applied),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -480,6 +481,7 @@ def reduce():
         'download_url': f'/api/download/{sid}',
         'hybrid_mode': use_hybrid,
         'protected_words_count': len(protected_words),
+        'fallback': any(item.get('fallback') for item in applied),
         'ai_config_received': {
             'api_url': ai_config['api_url'],
             'model': ai_config['model'],
@@ -628,6 +630,7 @@ def ai_reduce():
                 'method': 'ai',
                 'risk_level': risk_map.get(idx, 'unknown'),
                 'is_low_confidence': bool(next((item.get('report_low_confidence', False) for item in analysis if item['index'] == idx), False)),
+                'fallback': any('AI失败后自动切换规则降重' in str(rule) for rule in result.rules_applied),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -652,6 +655,7 @@ def ai_reduce():
         'details': applied,
         'errors': errors,
         'download_url': f'/api/download/{sid}',
+        'fallback': any(item.get('fallback') for item in applied),
     }), status
 
 

@@ -412,14 +412,27 @@ function renderReduceResult(data) {
     $('#continueBtn').onclick = continueReduce;
     $('#restartBtn').onclick = resetDoc;
 
+    const fallbackNotice = $('#fallbackNotice');
+    const fallbackNoticeText = $('#fallbackNoticeText');
+    const hasFallback = Boolean(data.fallback)
+        || data.details.some(d => d.fallback)
+        || data.details.some(d => Array.isArray(d.rules) && d.rules.some(rule => String(rule).includes('AI失败后自动切换规则降重')));
+    fallbackNotice.style.display = hasFallback ? 'flex' : 'none';
+    if (hasFallback && fallbackNoticeText) {
+        fallbackNoticeText.textContent = '已自动切换为规则降重兜底';
+    }
+
     const list = $('#changeList');
     list.innerHTML = '';
 
     data.details.forEach(d => {
         const badge = getMethodBadge(d.method);
         const lowConfidenceBadge = d.is_low_confidence
-            ? '<span class="badge-warning">低置信度匹配</span>'
+            ? '<span class="badge-warning">⚠ 匹配置信度较低</span>'
             : '';
+        const strategyTags = (Array.isArray(d.rules) ? d.rules : [])
+            .map(rule => `<span class="strategy-tag">${escapeHtml(rule)}</span>`)
+            .join('');
         const item = document.createElement('div');
         item.className = 'change-item';
         item.dataset.index = d.index;
@@ -433,14 +446,12 @@ function renderReduceResult(data) {
                 <span class="method-badge ${badge.className}">${badge.text}</span>
                 ${lowConfidenceBadge}
                 <span class="change-arrow">→</span>
-                <span style="font-size:12px;color:var(--text-muted)">
-                    ${d.rules.join(', ')}
-                </span>
                 <button class="btn btn-small undo-btn" data-index="${d.index}" title="撤销">↶</button>
                 <button class="btn btn-small retry-btn" data-index="${d.index}">单段重试</button>
             </div>
-            <div class="change-before">${renderDiffHtml(d.original, d.transformed)}</div>
+            <div class="change-before">${escapeHtml(d.original)}</div>
             <div class="change-after editable" contenteditable="true" data-index="${d.index}">${renderDiffHtml(d.original, d.transformed)}</div>
+            <div class="change-meta">${strategyTags}</div>
         `;
 
         const editable = item.querySelector('.change-after');
@@ -538,6 +549,12 @@ async function retrySingleSegment(item, detail) {
         updateDownloadButtonState();
 
         if (data.fallback === 'rule' || (Array.isArray(data.rules_applied) && data.rules_applied.some(r => r.includes('AI失败后自动切换规则降重')))) {
+            const fallbackNotice = $('#fallbackNotice');
+            const fallbackNoticeText = $('#fallbackNoticeText');
+            if (fallbackNotice && fallbackNoticeText) {
+                fallbackNotice.style.display = 'flex';
+                fallbackNoticeText.textContent = '已自动切换为规则降重兜底';
+            }
             showSaveFeedback('AI失败，已自动转为规则降重');
         }
 
@@ -567,25 +584,45 @@ function updateDownloadButtonState() {
 }
 
 function tokenizeForDiff(text) {
-    return (text || '').split(/([，。；：、“”‘’！？,.!?()（）\s]+)/).filter(Boolean);
+    return (text || '')
+        .split(/([，。；：、“”‘’！？,.!?()（）\s]+)/)
+        .filter(token => token !== '');
 }
 
-function findNearbyTokenIndex(tokens, token, center, usedMap, windowSize = 2) {
-    const start = Math.max(0, center - windowSize);
-    const end = Math.min(tokens.length - 1, center + windowSize);
+function buildTokenIndexMap(tokens) {
+    const indexMap = new Map();
+    tokens.forEach((token, idx) => {
+        if (!token.trim()) return;
+        if (!indexMap.has(token)) {
+            indexMap.set(token, []);
+        }
+        indexMap.get(token).push(idx);
+    });
+    return indexMap;
+}
 
-    for (let i = start; i <= end; i += 1) {
-        if (tokens[i] !== token) continue;
-        if (usedMap.has(i)) continue;
-        return i;
-    }
-    return -1;
+function findNearbyTokenIndex(indexMap, token, center, usedMap, windowSize = 3) {
+    const candidates = indexMap.get(token) || [];
+    let bestIdx = -1;
+    let bestDistance = Infinity;
+
+    candidates.forEach((candidateIdx) => {
+        if (usedMap.has(candidateIdx)) return;
+        const distance = Math.abs(candidateIdx - center);
+        if (distance <= windowSize && distance < bestDistance) {
+            bestIdx = candidateIdx;
+            bestDistance = distance;
+        }
+    });
+
+    return bestIdx;
 }
 
 function renderDiffHtml(original, transformed) {
     const origTokens = tokenizeForDiff(original);
     const newTokens = tokenizeForDiff(transformed);
     const usedOrigIndices = new Set();
+    const origIndexMap = buildTokenIndexMap(origTokens);
 
     return newTokens.map((token, idx) => {
         const safe = escapeHtml(token);
@@ -596,7 +633,7 @@ function renderDiffHtml(original, transformed) {
             return safe;
         }
 
-        const nearbyIdx = findNearbyTokenIndex(origTokens, token, idx, usedOrigIndices, 2);
+        const nearbyIdx = findNearbyTokenIndex(origIndexMap, token, idx, usedOrigIndices, 3);
         if (nearbyIdx >= 0) {
             usedOrigIndices.add(nearbyIdx);
             return safe;

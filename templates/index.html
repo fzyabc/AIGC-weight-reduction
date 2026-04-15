@@ -192,6 +192,12 @@
                             <textarea id="customPrompt" class="input-text input-textarea"
                                       placeholder="例如：保留学术风格，避免口语化，重点保留法条和变量名"></textarea>
                         </div>
+                        <div class="setting-group">
+                            <label>术语保护输入</label>
+                            <textarea id="protectedWords" class="input-text input-textarea"
+                                      placeholder="每行一个，例如：&#10;深度学习&#10;梯度下降&#10;Transformer"></textarea>
+                            <div class="input-hint">调用 /api/reduce 与 /api/ai-reduce 时会作为 protected_words 数组传给后端。</div>
+                        </div>
                         <button class="btn btn-small btn-test" id="testLlmBtn">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
@@ -206,13 +212,7 @@
                 <section class="card" id="advancedReduceSection">
                     <div class="card-header">
                         <span class="step-num">4</span>
-                        <h3>高级降重设置</h3>
-                    </div>
-                    <div class="setting-group">
-                        <label>术语保护库</label>
-                        <textarea id="protectedWords" class="input-text input-textarea"
-                                  placeholder="每行一个，或用逗号分隔，例如：&#10;深度学习&#10;梯度下降&#10;Transformer"></textarea>
-                        <div class="input-hint">这些术语会在降重前用占位符保护，完成后自动恢复。</div>
+                        <h3>高级引擎设置</h3>
                     </div>
                     <div class="setting-group">
                         <label class="toggle-label">
@@ -331,6 +331,10 @@
                                 上传新文件
                             </button>
                         </div>
+                    </div>
+                    <div class="fallback-notice" id="fallbackNotice" style="display:none">
+                        <strong>引擎状态：</strong>
+                        <span id="fallbackNoticeText">已自动切换为规则降重兜底</span>
                     </div>
                     <div class="change-list" id="changeList"></div>
                 </div>
