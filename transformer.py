@@ -32,65 +32,63 @@ random.seed()
 
 SEQUENCE_CONNECTORS = {
     '首先': [
-        '从根本上说', '追根溯源', '之所以这样说', '若要厘清这一问题',
-        '问题的起点在于', '值得注意的是', '一个不容回避的事实是',
+        '从源头来看', '要说清楚这件事', '先说一个前提',
+        '问题的起点在于', '最根本的一点是',
     ],
     '其次': [
-        '进一步而言', '循此逻辑', '在此基础上', '沿着这条线索',
-        '由此引申', '与此同时还需看到', '紧接着的问题是',
+        '接下来', '在此基础上', '沿着这个思路往下',
+        '再往下说', '第二点是',
     ],
     '此外': [
-        '另一个值得关注的维度是', '不仅如此', '除此之外还有一层考量',
-        '从另一个侧面看', '值得补充的是', '还有一点不容忽视',
+        '还有一点', '除了这些', '另外',
+        '从另一面来看', '同时也要注意',
     ],
     '最后': [
-        '归根结底', '回到问题的核心', '将上述分析汇总来看',
-        '综合以上讨论', '行文至此', '如果做一个阶段性的小结',
+        '说到最后', '回过头来看', '做个收尾',
+        '到这里可以说', '末了还要提一句',
     ],
     '综上所述': [
-        '将上述几条线索归拢来看', '回顾前文的讨论脉络',
-        '至此可以做一个初步判断', '经过上述分析不难发现',
-        '如果将以上论点串联起来', '从整体视角审视',
+        '总的来看', '回过头再看这些',
+        '把前面说的串起来', '几点综合来看',
     ],
     '总而言之': [
-        '概括地讲', '行文至此可以说', '做一个简要的回顾',
-        '站在全局的角度', '汇总前文要点',
+        '简单来讲', '说到底', '归结起来',
+        '总的来说', '一句话概括',
     ],
     '其一': [
-        '第一个层面', '从一个方面来看', '先看第一重关系',
+        '第一点', '先看一面', '一个方面是',
     ],
     '其二': [
-        '第二个层面涉及', '再看另一重关系', '从另一面来说',
+        '第二点', '再看另一面', '还有一方面',
     ],
     '其三': [
-        '还有一个不可忽略的因素', '第三重考量在于',
+        '第三点', '另外还有',
     ],
     '一方面': [
-        '站在一个角度看', '从某种意义上说', '就某一面向而言',
+        '从一面看', '就某个角度来说', '一边是',
     ],
     '另一方面': [
-        '换一个视角', '但从另一层意思理解', '反过来看这个问题',
+        '换个角度', '从另一面看', '反过来看',
     ],
 }
 
 ACADEMIC_CONNECTORS = {
-    '因此': ['由此观之', '基于这一逻辑', '正因如此', '这也意味着', '循此推理'],
-    '然而': ['但不可忽视的是', '话虽如此', '可事实并非如此简单', '不过需要看到'],
-    '同时': ['与此并行的是', '在这一过程中', '伴随着这一趋势'],
-    '可以看出': ['不难发现', '由此可见端倪', '这背后的逻辑是', '透过现象看本质'],
-    '具有重要意义': ['其价值不言而喻', '这一点在实践中尤为突出', '其分量不可小觑'],
-    '值得注意的是': ['需要特别指出的一点是', '有一个细节不容忽视', '耐人寻味的是'],
-    '需要指出的是': ['有必要提及的是', '这里有一个关键点', '笔者认为应当强调'],
+    '因此': ['所以', '这样一来', '正因如此', '这也就意味着', '也就是说'],
+    '然而': ['不过', '但实际情况是', '话虽如此', '可问题在于', '但反过来看'],
+    '同时': ['与此同时', '在这个过程中', '伴随这一变化'],
+    '可以看出': ['能看出来', '从中可以发现', '这说明', '由此来看'],
+    '具有重要意义': ['很关键', '在实践中很突出', '影响很大'],
+    '值得注意的是': ['要注意的是', '有个细节值得留意', '比较特别的是'],
+    '需要指出的是': ['要说明的是', '这里有个关键点', '必须提到的一点是'],
 }
 
 HUMAN_MARKERS = [
-    '笔者认为', '不可否认的是', '诚如前文所述',
-    '需要坦率地说', '从实践经验来看',
-    '一个值得追问的问题是', '站在实务的角度',
-    '坦白讲', '说得更具体一点',
-    '这里有一个不容回避的现实', '如果追问背后的原因',
-    '从笔者调研的情况来看', '在这个问题上',
-    '事实上', '客观地说', '回到问题本身',
+    '实际上', '说白了', '换句话说',
+    '说到底', '具体来看', '仔细想想',
+    '严格来说', '通俗地讲', '举个例子来说',
+    '这里要多说一句', '有意思的是',
+    '稍微展开一下', '往深了说',
+    '直白一点', '简单来讲',
 ]
 
 SCENARIO_TEMPLATES = [
@@ -103,8 +101,8 @@ SCENARIO_TEMPLATES = [
 
 SYMMETRY_BREAKERS = [
     ('。{connector}', '——{connector}'),
-    ('。{connector}', '；从这个角度出发，'),
-    ('。{connector}', '。\n换一个维度来看，'),
+    ('。{connector}', '；顺着这个思路，'),
+    ('。{connector}', '。\n换个角度来说，'),
 ]
 
 
@@ -281,7 +279,7 @@ class Transformer:
         return text, applied
 
     def _inject_human_markers(self, text: str) -> tuple[str, list[str]]:
-        """注入人类写作痕迹"""
+        """注入人类写作痕迹——在句间自然插入口语化衔接词"""
         applied = []
         available = [m for m in HUMAN_MARKERS if m not in self._used_markers]
         if not available:
@@ -289,23 +287,25 @@ class Transformer:
             available = HUMAN_MARKERS.copy()
 
         sentences = re.split(r'(?<=[。！？])', text)
-        if len(sentences) < 2:
+        sentences = [s for s in sentences if s.strip()]
+        if len(sentences) < 3:
             return text, applied
 
         marker = random.choice(available)
         self._used_markers.add(marker)
 
-        insert_pos = random.randint(1, min(3, len(sentences) - 1))
+        # 选一个中间位置的句子，在句首自然地加上衔接词
+        insert_pos = random.randint(1, min(4, len(sentences) - 1))
         s = sentences[insert_pos].strip()
         if s and not any(s.startswith(m) for m in HUMAN_MARKERS):
-            sentences[insert_pos] = marker + '，' + s[0].lower() + s[1:] if s else s
-            applied.append(f'注入主观标记: {marker}')
+            sentences[insert_pos] = marker + '，' + s
+            applied.append(f'插入衔接: {marker}')
 
         text = ''.join(sentences)
         return text, applied
 
     def _restructure_sentences(self, text: str) -> tuple[str, list[str]]:
-        """重构句子结构（激进模式）"""
+        """重构句子结构（激进模式）——只做拆分长句，不做机械的主被动转换"""
         applied = []
 
         long_sentences = re.findall(r'[^。！？]{60,}[。！？]', text)
@@ -317,15 +317,6 @@ class Transformer:
                 new_sentence = target[:mid_comma] + '。' + target[mid_comma + 1:]
                 text = text.replace(target, new_sentence, 1)
                 applied.append('拆分长句')
-
-        if self.aggressiveness >= 3:
-            passive_candidates = re.findall(r'(\S{2,4})能够(\S+)', text)
-            for subj, verb_rest in passive_candidates[:1]:
-                old = f'{subj}能够{verb_rest}'
-                new = f'{verb_rest}得以通过{subj}实现'
-                if len(new) < len(old) * 2:
-                    text = text.replace(old, new, 1)
-                    applied.append(f'主动→被动: {old[:15]}...')
 
         return text, applied
 
