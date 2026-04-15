@@ -37,6 +37,8 @@ document.addEventListener('DOMContentLoaded', () => {
     initActionButtons();
     initReuploadButtons();
     initAISection();
+    window.__AIGC_FRONTEND_BUILD__ = document.body.dataset.frontendVersion || 'unknown';
+    console.log('[AIGC Reducer] frontend build =', window.__AIGC_FRONTEND_BUILD__);
     window.addEventListener('beforeunload', (e) => {
         if (!state.hasUnsavedEdits) return;
         e.preventDefault();
@@ -1057,6 +1059,7 @@ async function runAIReduce() {
     const protectedWords = getProtectedWords();
     saveAIConfig();
     setStatus('working', 'AI降重中...');
+    console.log('[AIGC Reducer] runAIReduce live mode start', { selected: selected.length, build: window.__AIGC_FRONTEND_BUILD__ });
     startProgress(selected.length, 'AI 降重进行中');
     startLiveProgress(selected.length, '实时 AI 降重监控');
     prepareLiveReduceView();

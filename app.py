@@ -29,6 +29,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
 app.config['OUTPUT_FOLDER'] = os.path.join(os.path.dirname(__file__), 'outputs')
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
@@ -142,6 +143,15 @@ def _asset_version(*relative_parts: str) -> str:
         return str(int(os.path.getmtime(full_path)))
     except OSError:
         return str(int(time.time()))
+
+
+@app.after_request
+def add_no_cache_headers(response):
+    """开发态强制禁用缓存，避免前端静态资源或模板吃旧版本。"""
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 
 @app.route('/')
