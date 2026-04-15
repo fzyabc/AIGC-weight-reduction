@@ -9,6 +9,7 @@ const state = {
     sessionId: null,
     level: 2,
     paragraphs: [],
+    paragraphMap: new Map(),
     selectedIndices: new Set(),
     round: 1,
     aiEnabled: false,
@@ -20,6 +21,11 @@ const state = {
     finalResults: {},
     hasUnsavedEdits: false,
     progressWarningShown: false,
+    liveReduce: {
+        current: 0,
+        total: 0,
+        done: false,
+    },
 };
 
 // ============================================================
@@ -185,6 +191,7 @@ async function runAnalyze() {
         if (data.error) throw new Error(data.error);
 
         state.paragraphs = data.paragraphs;
+        state.paragraphMap = new Map(data.paragraphs.map(p => [p.index, p]));
 
         $('#statHigh').textContent = data.high_count;
         $('#statMed').textContent = data.medium_count;
@@ -222,12 +229,76 @@ async function runReduce() {
     saveAIConfig();
 
     setStatus('working', hybridMode ? '混合降重中...' : '降重中...');
-    showLoading(`正在处理 ${selected.length} 个段落...`);
     startProgress(selected.length, hybridMode ? '混合降重进行中' : '规则降重进行中');
+    startLiveProgress(selected.length, hybridMode ? '实时混合降重监控' : '实时规则降重监控');
+    prepareLiveReduceView();
     pollProgress(state.sessionId);
 
     try {
-        const res = await fetch('/api/reduce', {
+        const tasks = selected.map(async (index, order) => {
+            const para = state.paragraphMap.get(index);
+            if (!para) {
+                updateLiveProgress(order + 1, selected.length);
+                return null;
+            }
+
+            const useAiPreview = hybridMode && Boolean(aiConfig.api_key);
+            const previewUrl = useAiPreview ? '/api/ai-preview' : '/api/preview';
+            const previewPayload = useAiPreview
+                ? {
+                    text: para.full_text || para.text,
+                    risk_level: para.risk_level,
+                    protected_words: protectedWords,
+                    ...aiConfig,
+                }
+                : {
+                    session_id: state.sessionId,
+                    text: para.full_text || para.text,
+                    level: state.level,
+                    risk_level: para.risk_level,
+                    protected_words: protectedWords,
+                };
+
+            try {
+                const previewRes = await fetch(previewUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(previewPayload),
+                });
+                const previewData = await previewRes.json();
+                appendParagraphToView({
+                    index,
+                    original: para.full_text || para.text,
+                    transformed: previewData.transformed || para.full_text || para.text,
+                    rules: previewData.rules_applied || [],
+                    method: previewData.fallback === 'rule' ? 'rule' : (useAiPreview ? 'ai' : 'rule'),
+                    risk_level: para.risk_level,
+                    is_low_confidence: Boolean(para.report_low_confidence),
+                    fallback: previewData.fallback === 'rule',
+                    ai_error: previewData.ai_error || null,
+                });
+            } catch {
+                appendParagraphToView({
+                    index,
+                    original: para.full_text || para.text,
+                    transformed: para.full_text || para.text,
+                    rules: ['实时预览失败，等待最终结果'],
+                    method: useAiPreview ? 'ai' : 'rule',
+                    risk_level: para.risk_level,
+                    is_low_confidence: Boolean(para.report_low_confidence),
+                    fallback: false,
+                    ai_error: {
+                        code: 'preview_failed',
+                        message: `实时渲染阶段调用 ${previewUrl} 失败`,
+                    },
+                });
+            } finally {
+                updateLiveProgress(order + 1, selected.length);
+            }
+            return null;
+        });
+
+        const finalPromise = fetch('/api/reduce', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -238,8 +309,10 @@ async function runReduce() {
                 protected_words: protectedWords,
                 hybrid_mode: hybridMode,
             }),
-        });
-        const data = await res.json();
+        }).then(res => res.json());
+
+        await Promise.all(tasks);
+        const data = await finalPromise;
         if (data.error) throw new Error(data.error);
 
         finishProgress(selected.length, selected.length, '规则降重已完成');
@@ -255,6 +328,7 @@ async function runReduce() {
         setStatus('', '降重失败');
     } finally {
         stopProgress();
+        stopLiveProgress();
         hideLoading();
     }
 }
@@ -396,6 +470,75 @@ function getSelectedIndices() {
 // ============================================================
 // 降重结果
 // ============================================================
+function prepareLiveReduceView() {
+    $('#resultsArea').style.display = 'none';
+    $('#reduceResult').style.display = 'block';
+    $('#changeList').innerHTML = '';
+    $('#reduceInfo').textContent = '正在实时渲染降重结果...';
+    const fallbackNotice = $('#fallbackNotice');
+    if (fallbackNotice) fallbackNotice.style.display = 'none';
+    state.finalResults = {};
+    state.hasUnsavedEdits = false;
+    updateDownloadButtonState();
+}
+
+function appendParagraphToView(detail) {
+    const list = $('#changeList');
+    const existing = list.querySelector(`.change-item[data-index="${detail.index}"]`);
+    const badge = getMethodBadge(detail.method);
+    const lowConfidenceBadge = detail.is_low_confidence
+        ? '<span class="badge-warning">⚠ 匹配置信度较低</span>'
+        : '';
+    const aiErrorTags = detail.ai_error ? buildAiErrorTags(detail.ai_error) : '';
+    const strategyTags = (Array.isArray(detail.rules) ? detail.rules : [])
+        .map(rule => `<span class="strategy-tag">${escapeHtml(rule)}</span>`)
+        .join('') + aiErrorTags;
+    const html = `
+        <div class="change-header">
+            <span class="para-index">P${detail.index}</span>
+            <span class="method-badge ${badge.className}">${badge.text}</span>
+            ${lowConfidenceBadge}
+            <span class="change-arrow">→</span>
+            <button class="btn btn-small undo-btn" data-index="${detail.index}" title="撤销">↶</button>
+            <button class="btn btn-small retry-btn" data-index="${detail.index}">单段重试</button>
+        </div>
+        <div class="change-before">${escapeHtml(detail.original || '')}</div>
+        <div class="change-after editable" contenteditable="true" data-index="${detail.index}">${renderDiffHtml(detail.original || '', detail.transformed || '')}</div>
+        <div class="change-meta">${strategyTags}</div>
+    `;
+
+    let item = existing;
+    if (!item) {
+        item = document.createElement('div');
+        item.className = 'change-item';
+        item.dataset.index = detail.index;
+        list.appendChild(item);
+    }
+
+    item.dataset.method = detail.method || 'none';
+    item.dataset.riskLevel = detail.risk_level || 'medium';
+    item.dataset.original = detail.original || '';
+    item.innerHTML = html;
+
+    state.finalResults[String(detail.index)] = [detail.transformed || ''];
+
+    const editable = item.querySelector('.change-after');
+    editable.addEventListener('focus', () => {
+        editable.innerText = getCurrentFinalText(String(detail.index));
+    });
+    editable.addEventListener('blur', () => {
+        const idx = String(detail.index);
+        const newText = editable.innerText;
+        pushHistoryVersion(idx, newText);
+        editable.innerHTML = renderDiffHtml(item.dataset.original || detail.original || '', newText);
+        state.hasUnsavedEdits = true;
+        updateDownloadButtonState();
+    });
+
+    item.querySelector('.retry-btn').addEventListener('click', () => retrySingleSegment(item, detail));
+    item.querySelector('.undo-btn').addEventListener('click', () => undoSingleSegment(item, detail.index));
+}
+
 function renderReduceResult(data) {
     let infoText = `已修改 ${data.modified_count} 个段落`;
     if (data.summary) {
@@ -1116,6 +1259,33 @@ function stopProgress() {
         $('#progressFill').style.width = '0%';
         $('#progressText').textContent = '0 / 0';
     }, 300);
+}
+
+function startLiveProgress(total, title = '实时降重监控') {
+    state.liveReduce.current = 0;
+    state.liveReduce.total = total;
+    state.liveReduce.done = false;
+    $('#liveProgressFloat').style.display = 'block';
+    $('#liveProgressTitle').textContent = title;
+    updateLiveProgress(0, total);
+}
+
+function updateLiveProgress(current, total = state.liveReduce.total) {
+    state.liveReduce.current = current;
+    state.liveReduce.total = total;
+    const safeTotal = Math.max(total, 1);
+    const percent = Math.max(0, Math.min(100, (current / safeTotal) * 100));
+    $('#liveProgressValue').textContent = `${current} / ${total}`;
+    $('#liveProgressFill').style.width = `${percent}%`;
+}
+
+function stopLiveProgress() {
+    state.liveReduce.done = true;
+    setTimeout(() => {
+        $('#liveProgressFloat').style.display = 'none';
+        $('#liveProgressFill').style.width = '0%';
+        $('#liveProgressValue').textContent = '0 / 0';
+    }, 400);
 }
 
 function pollProgress(sessionId) {
