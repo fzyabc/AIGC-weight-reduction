@@ -19,6 +19,7 @@ const state = {
     },
     finalResults: {},
     hasUnsavedEdits: false,
+    progressWarningShown: false,
 };
 
 // ============================================================
@@ -356,6 +357,7 @@ async function toggleExpand(item, para) {
                     .map(r => `<span class="rule-tag">${r}</span>`).join('');
             } catch {
                 previewEl.textContent = '预览加载失败';
+                setStatus('', '预览加载失败');
             }
         }
     }
@@ -415,6 +417,9 @@ function renderReduceResult(data) {
 
     data.details.forEach(d => {
         const badge = getMethodBadge(d.method);
+        const lowConfidenceBadge = d.is_low_confidence
+            ? '<span class="badge-warning">低置信度匹配</span>'
+            : '';
         const item = document.createElement('div');
         item.className = 'change-item';
         item.dataset.index = d.index;
@@ -426,6 +431,7 @@ function renderReduceResult(data) {
             <div class="change-header">
                 <span class="para-index">P${d.index}</span>
                 <span class="method-badge ${badge.className}">${badge.text}</span>
+                ${lowConfidenceBadge}
                 <span class="change-arrow">→</span>
                 <span style="font-size:12px;color:var(--text-muted)">
                     ${d.rules.join(', ')}
@@ -564,18 +570,39 @@ function tokenizeForDiff(text) {
     return (text || '').split(/([，。；：、“”‘’！？,.!?()（）\s]+)/).filter(Boolean);
 }
 
+function findNearbyTokenIndex(tokens, token, center, usedMap, windowSize = 2) {
+    const start = Math.max(0, center - windowSize);
+    const end = Math.min(tokens.length - 1, center + windowSize);
+
+    for (let i = start; i <= end; i += 1) {
+        if (tokens[i] !== token) continue;
+        if (usedMap.has(i)) continue;
+        return i;
+    }
+    return -1;
+}
+
 function renderDiffHtml(original, transformed) {
     const origTokens = tokenizeForDiff(original);
     const newTokens = tokenizeForDiff(transformed);
-    const origSet = new Set(origTokens.filter(t => t.trim()));
+    const usedOrigIndices = new Set();
 
-    return newTokens.map(token => {
+    return newTokens.map((token, idx) => {
         const safe = escapeHtml(token);
         if (!token.trim()) return safe;
-        if (!origSet.has(token)) {
-            return `<span class="diff-added">${safe}</span>`;
+
+        if (origTokens[idx] === token && !usedOrigIndices.has(idx)) {
+            usedOrigIndices.add(idx);
+            return safe;
         }
-        return safe;
+
+        const nearbyIdx = findNearbyTokenIndex(origTokens, token, idx, usedOrigIndices, 2);
+        if (nearbyIdx >= 0) {
+            usedOrigIndices.add(nearbyIdx);
+            return safe;
+        }
+
+        return `<span class="diff-added">${safe}</span>`;
     }).join('');
 }
 
@@ -721,7 +748,9 @@ function saveAIConfig() {
         localStorage.setItem('aigc_ai_custom_prompt', cfg.custom_prompt || '');
         localStorage.setItem('aigc_protected_words', $('#protectedWords').value || '');
         localStorage.setItem('aigc_hybrid_mode', $('#hybridMode').checked ? '1' : '0');
-    } catch {}
+    } catch {
+        setStatus('', '本地配置保存失败');
+    }
 }
 
 function loadAIConfig() {
@@ -740,7 +769,9 @@ function loadAIConfig() {
         if (customPrompt) $('#customPrompt').value = customPrompt;
         if (protectedWords) $('#protectedWords').value = protectedWords;
         $('#hybridMode').checked = hybridMode === '1';
-    } catch {}
+    } catch {
+        setStatus('', '本地配置加载失败');
+    }
 }
 
 async function testLLMConnection() {
@@ -1009,6 +1040,7 @@ function pollProgress(sessionId) {
         clearInterval(state.progress.timer);
     }
 
+    state.progressWarningShown = false;
     state.progress.timer = setInterval(async () => {
         try {
             const res = await fetch(`/api/progress/${sessionId}`);
@@ -1021,7 +1053,10 @@ function pollProgress(sessionId) {
                 state.progress.timer = null;
             }
         } catch {
-            // 忽略轮询瞬时错误
+            if (!state.progressWarningShown) {
+                setStatus('', '进度轮询暂时异常');
+                state.progressWarningShown = true;
+            }
         }
     }, 350);
 }

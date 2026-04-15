@@ -433,6 +433,7 @@ def reduce():
                 'rules': result.rules_applied + ([f'模式: {mode}'] if mode != 'skip' else ['模式: 跳过']),
                 'method': 'none' if mode == 'skip' else mode,
                 'risk_level': risk_map.get(idx, 'unknown'),
+                'is_low_confidence': bool(analysis_map.get(idx, {}).get('report_low_confidence', False)),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -626,6 +627,7 @@ def ai_reduce():
                 'rules': result.rules_applied,
                 'method': 'ai',
                 'risk_level': risk_map.get(idx, 'unknown'),
+                'is_low_confidence': bool(next((item.get('report_low_confidence', False) for item in analysis if item['index'] == idx), False)),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
