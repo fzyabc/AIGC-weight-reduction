@@ -751,6 +751,11 @@ input[type="checkbox"] {
     color: #a5b4fc;
 }
 
+.strategy-tag-error {
+    background: rgba(239, 68, 68, 0.14);
+    color: #fca5a5;
+}
+
 .change-after.editable {
     outline: none;
     min-height: 72px;

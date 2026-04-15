@@ -397,7 +397,17 @@ function getSelectedIndices() {
 // 降重结果
 // ============================================================
 function renderReduceResult(data) {
-    $('#reduceInfo').textContent = `已修改 ${data.modified_count} 个段落`;
+    let infoText = `已修改 ${data.modified_count} 个段落`;
+    if (data.summary) {
+        const aiSuccess = data.summary.ai_success_count || 0;
+        const fallbackCount = data.summary.fallback_count || 0;
+        const failedCount = data.summary.failed_count || 0;
+        const parts = [`AI成功 ${aiSuccess} 段`];
+        if (fallbackCount > 0) parts.push(`规则兜底 ${fallbackCount} 段`);
+        if (failedCount > 0) parts.push(`彻底失败 ${failedCount} 段`);
+        infoText = `${infoText}（${parts.join('，')}）`;
+    }
+    $('#reduceInfo').textContent = infoText;
 
     state.finalResults = {};
     data.details.forEach(d => {
@@ -430,9 +440,10 @@ function renderReduceResult(data) {
         const lowConfidenceBadge = d.is_low_confidence
             ? '<span class="badge-warning">⚠ 匹配置信度较低</span>'
             : '';
+        const aiErrorTags = d.ai_error ? buildAiErrorTags(d.ai_error) : '';
         const strategyTags = (Array.isArray(d.rules) ? d.rules : [])
             .map(rule => `<span class="strategy-tag">${escapeHtml(rule)}</span>`)
-            .join('');
+            .join('') + aiErrorTags;
         const item = document.createElement('div');
         item.className = 'change-item';
         item.dataset.index = d.index;
@@ -548,7 +559,8 @@ async function retrySingleSegment(item, detail) {
         state.hasUnsavedEdits = true;
         updateDownloadButtonState();
 
-        if (data.fallback === 'rule' || (Array.isArray(data.rules_applied) && data.rules_applied.some(r => r.includes('AI失败后自动切换规则降重')))) {
+        const usedFallback = data.fallback === 'rule' || (Array.isArray(data.rules_applied) && data.rules_applied.some(r => r.includes('AI失败后自动切换规则降重')));
+        if (usedFallback) {
             const fallbackNotice = $('#fallbackNotice');
             const fallbackNoticeText = $('#fallbackNoticeText');
             if (fallbackNotice && fallbackNoticeText) {
@@ -558,11 +570,18 @@ async function retrySingleSegment(item, detail) {
             showSaveFeedback('AI失败，已自动转为规则降重');
         }
 
-        item.dataset.method = 'ai';
+        item.dataset.method = usedFallback ? 'rule' : 'ai';
         const badge = item.querySelector('.method-badge');
         if (badge) {
-            badge.className = 'method-badge ai';
-            badge.textContent = '[AI Mode]';
+            badge.className = `method-badge ${usedFallback ? 'rule' : 'ai'}`;
+            badge.textContent = usedFallback ? '[Rule Mode]' : '[AI Mode]';
+        }
+        const meta = item.querySelector('.change-meta');
+        if (meta) {
+            const tags = (Array.isArray(data.rules_applied) ? data.rules_applied : [])
+                .map(rule => `<span class="strategy-tag">${escapeHtml(rule)}</span>`)
+                .join('');
+            meta.innerHTML = tags + (data.ai_error ? buildAiErrorTags(data.ai_error) : '');
         }
         showSaveFeedback('单段重试成功，记得保存');
     } catch (err) {
@@ -581,6 +600,27 @@ function updateDownloadButtonState() {
     } else {
         btn.classList.remove('btn-warning');
     }
+}
+
+function buildAiErrorTags(error) {
+    if (!error) return '';
+    const tags = [];
+    if (error.code) {
+        tags.push(`<span class="strategy-tag strategy-tag-error">AI错误: ${escapeHtml(String(error.code))}</span>`);
+    }
+    if (error.status !== undefined && error.status !== null) {
+        tags.push(`<span class="strategy-tag strategy-tag-error">状态码: ${escapeHtml(String(error.status))}</span>`);
+    }
+    if (error.attempts) {
+        tags.push(`<span class="strategy-tag strategy-tag-error">重试次数: ${escapeHtml(String(error.attempts))}</span>`);
+    }
+    if (error.retry_after) {
+        tags.push(`<span class="strategy-tag strategy-tag-error">Retry-After: ${escapeHtml(String(error.retry_after))}</span>`);
+    }
+    if (error.message) {
+        tags.push(`<span class="strategy-tag strategy-tag-error">${escapeHtml(String(error.message).slice(0, 120))}</span>`);
+    }
+    return tags.join('');
 }
 
 function tokenizeForDiff(text) {
@@ -894,11 +934,18 @@ async function runAIReduce() {
         finishProgress(selected.length, selected.length, 'AI 降重已完成');
 
         let info = `AI改写 ${data.modified_count} 个段落`;
-        if (data.error_count > 0) {
+        if (data.summary) {
+            info += `，AI成功 ${data.summary.ai_success_count || 0} 段`;
+            if ((data.summary.fallback_count || 0) > 0) {
+                info += `，规则兜底 ${data.summary.fallback_count} 段`;
+            }
+            if ((data.summary.failed_count || 0) > 0) {
+                info += `，彻底失败 ${data.summary.failed_count} 段`;
+            }
+        } else if (data.error_count > 0) {
             info += `，${data.error_count} 个失败`;
         }
         renderReduceResult(data);
-        $('#reduceInfo').textContent = info;
 
         $('#resultsArea').style.display = 'none';
         $('#reduceResult').style.display = 'block';

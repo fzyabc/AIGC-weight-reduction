@@ -541,9 +541,16 @@ def ai_preview():
     )
 
     if result.error:
+        original_ai_error = result.error
         fallback = Transformer(aggressiveness=3)
         result = fallback.transform(text, risk, protected_words=protected_words)
         result.rules_applied.append('AI失败后自动切换规则降重')
+        if original_ai_error:
+            code = original_ai_error.get('code', 'unknown')
+            msg = str(original_ai_error.get('message', ''))[:80]
+            result.rules_applied.append(f'AI错误: {code}')
+            if msg:
+                result.rules_applied.append(f'失败原因: {msg}')
         return jsonify({
             'original': result.original,
             'transformed': result.transformed,
@@ -551,6 +558,7 @@ def ai_preview():
             'change_ratio': round(result.change_ratio, 3),
             'fallback': 'rule',
             'fallback_message': '已自动转为规则降重',
+            'ai_error': original_ai_error,
         })
 
     return jsonify({
@@ -594,25 +602,44 @@ def ai_reduce():
 
     ai = AITransformer(api_config=ai_config)
     results = []
+    diagnostics = []
     for current, (idx, text) in enumerate(targets.items(), start=1):
         level_name = risk_map.get(idx, 'medium')
-        result = ai.transform(
+        ai_result = ai.transform(
             text,
             level_name,
             protected_words=protected_words,
             custom_prompt=ai_config.get('custom_prompt', ''),
         )
-        if result.error:
+
+        original_ai_error = ai_result.error
+        used_fallback = False
+        result = ai_result
+        if ai_result.error:
+            used_fallback = True
             fallback = Transformer(aggressiveness=3)
             result = fallback.transform(text, level_name, protected_words=protected_words)
             result.rules_applied.append('AI失败后自动切换规则降重')
+            if original_ai_error:
+                code = original_ai_error.get('code', 'unknown')
+                msg = str(original_ai_error.get('message', ''))[:80]
+                result.rules_applied.append(f'AI错误: {code}')
+                if msg:
+                    result.rules_applied.append(f'失败原因: {msg}')
+
         result.paragraph_index = idx
-        results.append(result)
-        _update_progress(sid, current)
+        results.append((result, original_ai_error, used_fallback))
+        diagnostics.append({
+            'index': idx,
+            'method': 'rule' if used_fallback else 'ai',
+            'fallback': used_fallback,
+            'ai_error': original_ai_error,
+        })
+        _update_progress(sid, current, label=f'AI 降重进行中（{current}/{len(targets)}）')
 
     applied = []
     errors = []
-    for result in results:
+    for result, original_ai_error, used_fallback in results:
         idx = result.paragraph_index
         if result.error:
             errors.append({
@@ -627,10 +654,11 @@ def ai_reduce():
                 'original': result.original,
                 'transformed': result.transformed,
                 'rules': result.rules_applied,
-                'method': 'ai',
+                'method': 'rule' if used_fallback else 'ai',
                 'risk_level': risk_map.get(idx, 'unknown'),
                 'is_low_confidence': bool(next((item.get('report_low_confidence', False) for item in analysis if item['index'] == idx), False)),
-                'fallback': any('AI失败后自动切换规则降重' in str(rule) for rule in result.rules_applied),
+                'fallback': used_fallback,
+                'ai_error': original_ai_error,
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -654,8 +682,14 @@ def ai_reduce():
         'error_count': len(errors),
         'details': applied,
         'errors': errors,
+        'diagnostics': diagnostics,
         'download_url': f'/api/download/{sid}',
         'fallback': any(item.get('fallback') for item in applied),
+        'summary': {
+            'ai_success_count': sum(1 for item in diagnostics if item['method'] == 'ai' and not item['fallback']),
+            'fallback_count': sum(1 for item in diagnostics if item['fallback']),
+            'failed_count': len(errors),
+        },
     }), status
 
 

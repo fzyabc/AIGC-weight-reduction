@@ -11,6 +11,7 @@ AIGC降重规则引擎
 """
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -415,6 +416,13 @@ class AITransformer:
             self.temperature = float(temperature)
         self.temperature = max(0.0, min(2.0, self.temperature))
 
+        raw_max_tokens = cfg.get('max_tokens', 1536)
+        try:
+            self.max_tokens = int(raw_max_tokens)
+        except (TypeError, ValueError):
+            self.max_tokens = 1536
+        self.max_tokens = max(256, min(4096, self.max_tokens))
+
     def transform(self, text: str, risk_level: str = 'medium',
                   protected_words: Optional[list[str]] = None,
                   custom_prompt: str = '') -> TransformResult:
@@ -620,6 +628,16 @@ class AITransformer:
                 },
             }
 
+    def _parse_retry_after(self, value) -> Optional[float]:
+        """把 Retry-After 头尽量转成秒数。"""
+        if value in (None, ''):
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(seconds, 30.0))
+
     def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
         system_prompt = self.SYSTEM_PROMPT
@@ -636,30 +654,54 @@ class AITransformer:
                 {'role': 'user', 'content': user_message},
             ],
             'temperature': self.temperature,
-            'max_tokens': 4096,
+            'max_tokens': self.max_tokens,
         }
 
-        result = self._request_json('/chat/completions', payload=payload, timeout=60)
-        if not result.get('ok'):
-            return result
+        max_attempts = 3
+        retriable_codes = {'rate_limited', 'upstream_server_error', 'network_error'}
+        last_error = None
 
-        data = result.get('data', {})
-        try:
-            content = data['choices'][0]['message']['content'].strip()
-            return {
-                'ok': True,
-                'content': content,
-                'error': None,
-            }
-        except Exception:
-            return {
-                'ok': False,
-                'error': {
-                    'code': 'invalid_response',
-                    'status': result.get('status', 200),
-                    'message': '模型返回格式异常，缺少 choices.message.content',
-                },
-            }
+        for attempt in range(1, max_attempts + 1):
+            result = self._request_json('/chat/completions', payload=payload, timeout=60)
+            if result.get('ok'):
+                data = result.get('data', {})
+                try:
+                    content = data['choices'][0]['message']['content'].strip()
+                    return {
+                        'ok': True,
+                        'content': content,
+                        'error': None,
+                        'attempts': attempt,
+                    }
+                except Exception:
+                    last_error = {
+                        'code': 'invalid_response',
+                        'status': result.get('status', 200),
+                        'message': '模型返回格式异常，缺少 choices.message.content',
+                        'attempts': attempt,
+                    }
+                    break
+
+            error = dict(result.get('error') or {})
+            error['attempts'] = attempt
+            last_error = error
+            code = error.get('code')
+            if attempt >= max_attempts or code not in retriable_codes:
+                break
+
+            retry_after = self._parse_retry_after(error.get('retry_after'))
+            sleep_seconds = retry_after if retry_after is not None else min(1.2 * attempt, 4.0)
+            time.sleep(sleep_seconds)
+
+        return {
+            'ok': False,
+            'error': last_error or {
+                'code': 'unexpected_error',
+                'status': 0,
+                'message': '模型调用失败',
+                'attempts': 1,
+            },
+        }
 
 
 def analyze_ai_patterns(text: str) -> dict:
