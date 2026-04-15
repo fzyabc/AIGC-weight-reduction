@@ -697,6 +697,16 @@ input[type="checkbox"] {
     color: var(--text);
 }
 
+.change-after.editable {
+    outline: none;
+    min-height: 72px;
+    white-space: pre-wrap;
+}
+
+.retry-btn {
+    margin-left: auto;
+}
+
 /* Loading */
 .loading-overlay {
     position: absolute;

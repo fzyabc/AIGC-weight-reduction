@@ -401,10 +401,11 @@ def reduce():
             replace_paragraph_text(doc, idx, new_text)
             applied.append({
                 'index': idx,
-                'original': result.original[:100],
-                'transformed': new_text[:100],
+                'original': result.original,
+                'transformed': new_text,
                 'rules': result.rules_applied + ([f'模式: {mode}'] if mode != 'skip' else ['模式: 跳过']),
                 'method': 'none' if mode == 'skip' else mode,
+                'risk_level': risk_map.get(idx, 'unknown'),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -463,12 +464,14 @@ def reduce():
 
 @app.route('/api/download/<sid>')
 def download(sid):
-    """下载降重后的文档"""
-    if sid not in sessions or 'output_path' not in sessions[sid]:
+    """下载最终导出的文档。"""
+    if sid not in sessions:
         return jsonify({'error': '文件不存在'}), 404
 
-    path = sessions[sid]['output_path']
-    name = sessions[sid].get('output_filename', 'output.docx')
+    path = sessions[sid].get('final_output_path') or sessions[sid].get('output_path')
+    name = sessions[sid].get('final_output_filename') or sessions[sid].get('output_filename', 'output.docx')
+    if not path or not os.path.exists(path):
+        return jsonify({'error': '文件不存在'}), 404
 
     return send_file(path, as_attachment=True, download_name=name)
 
@@ -584,9 +587,11 @@ def ai_reduce():
             replace_paragraph_text(doc, idx, result.transformed)
             applied.append({
                 'index': idx,
-                'original': result.original[:100],
-                'transformed': result.transformed[:100],
+                'original': result.original,
+                'transformed': result.transformed,
                 'rules': result.rules_applied,
+                'method': 'ai',
+                'risk_level': risk_map.get(idx, 'unknown'),
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -642,6 +647,53 @@ def continue_reduce():
         'session_id': sid,
         'round': sessions[sid]['round'],
         'stats': stats,
+    })
+
+
+@app.route('/api/finalize-export', methods=['POST'])
+def finalize_export():
+    """根据前端传回的最终文本映射生成最终导出版文档。"""
+    data = request.get_json() or {}
+    sid = data.get('session_id')
+    final_results = data.get('final_results') or {}
+
+    if not sid or sid not in sessions:
+        return _json_error('无效的会话ID')
+    if not isinstance(final_results, dict) or not final_results:
+        return _json_error('final_results 不能为空')
+
+    source_path = sessions[sid].get('doc_path')
+    if not source_path or not os.path.exists(source_path):
+        return _json_error('原始文档不存在', 404)
+
+    doc, paragraphs = read_docx(source_path)
+
+    applied_count = 0
+    for key, final_text in final_results.items():
+        try:
+            idx = int(key)
+        except (TypeError, ValueError):
+            continue
+        if final_text is None:
+            continue
+        if replace_paragraph_text(doc, idx, str(final_text)):
+            applied_count += 1
+
+    orig_name = sessions[sid].get('original_name', 'document.docx')
+    stem = Path(orig_name).stem
+    final_filename = f'{sid}_{stem}_最终版.docx'
+    final_path = os.path.join(app.config['OUTPUT_FOLDER'], final_filename)
+    save_docx(doc, final_path)
+
+    sessions[sid]['final_output_path'] = final_path
+    sessions[sid]['final_output_filename'] = f'{stem}_最终版.docx'
+    sessions[sid]['final_results'] = final_results
+
+    return jsonify({
+        'success': True,
+        'applied_count': applied_count,
+        'download_url': f'/api/download/{sid}',
+        'filename': sessions[sid]['final_output_filename'],
     })
 
 

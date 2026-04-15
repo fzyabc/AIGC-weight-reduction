@@ -17,6 +17,8 @@ const state = {
         total: 0,
         timer: null,
     },
+    finalResults: {},
+    hasUnsavedEdits: false,
 };
 
 // ============================================================
@@ -28,6 +30,11 @@ document.addEventListener('DOMContentLoaded', () => {
     initActionButtons();
     initReuploadButtons();
     initAISection();
+    window.addEventListener('beforeunload', (e) => {
+        if (!state.hasUnsavedEdits) return;
+        e.preventDefault();
+        e.returnValue = '你有未保存的修改，确认离开吗？';
+    });
 });
 
 // ============================================================
@@ -390,9 +397,14 @@ function getSelectedIndices() {
 function renderReduceResult(data) {
     $('#reduceInfo').textContent = `已修改 ${data.modified_count} 个段落`;
 
-    $('#downloadBtn').onclick = () => {
-        window.location.href = data.download_url;
-    };
+    state.finalResults = {};
+    data.details.forEach(d => {
+        state.finalResults[String(d.index)] = d.transformed;
+    });
+    state.hasUnsavedEdits = false;
+
+    $('#downloadBtn').onclick = finalizeAndDownload;
+    $('#downloadBtn').textContent = '保存所有修改并下载';
     $('#continueBtn').onclick = continueReduce;
     $('#restartBtn').onclick = resetDoc;
 
@@ -403,6 +415,10 @@ function renderReduceResult(data) {
         const badge = getMethodBadge(d.method);
         const item = document.createElement('div');
         item.className = 'change-item';
+        item.dataset.index = d.index;
+        item.dataset.method = d.method || 'none';
+        item.dataset.riskLevel = d.risk_level || 'medium';
+
         item.innerHTML = `
             <div class="change-header">
                 <span class="para-index">P${d.index}</span>
@@ -411,10 +427,20 @@ function renderReduceResult(data) {
                 <span style="font-size:12px;color:var(--text-muted)">
                     ${d.rules.join(', ')}
                 </span>
+                <button class="btn btn-small retry-btn" data-index="${d.index}">单段重试</button>
             </div>
-            <div class="change-before">${escapeHtml(d.original)}${d.original.length >= 100 ? '...' : ''}</div>
-            <div class="change-after">${escapeHtml(d.transformed)}${d.transformed.length >= 100 ? '...' : ''}</div>
+            <div class="change-before">${escapeHtml(d.original)}</div>
+            <div class="change-after editable" contenteditable="true" data-index="${d.index}">${escapeHtml(d.transformed)}</div>
         `;
+
+        const editable = item.querySelector('.change-after');
+        editable.addEventListener('input', () => {
+            state.finalResults[String(d.index)] = editable.innerText;
+            state.hasUnsavedEdits = true;
+            showSaveFeedback('已记录修改，待保存');
+        });
+
+        item.querySelector('.retry-btn').addEventListener('click', () => retrySingleSegment(item, d));
         list.appendChild(item);
     });
 }
@@ -427,6 +453,87 @@ function getMethodBadge(method) {
         return { text: '[Rule Mode]', className: 'rule' };
     }
     return { text: '[Original/Skipped]', className: 'none' };
+}
+
+async function retrySingleSegment(item, detail) {
+    const idx = String(detail.index);
+    const btn = item.querySelector('.retry-btn');
+    const editable = item.querySelector('.change-after');
+    const cfg = getAIConfig();
+
+    if (!cfg.api_key) {
+        alert('单段重试需要先填写 API Key');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '重试中...';
+
+    try {
+        const res = await fetch('/api/ai-preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                text: editable.innerText || detail.original,
+                risk_level: item.dataset.riskLevel || detail.risk_level || 'medium',
+                protected_words: getProtectedWords(),
+                ...cfg,
+            }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        editable.innerText = data.transformed;
+        state.finalResults[idx] = data.transformed;
+        state.hasUnsavedEdits = true;
+
+        item.dataset.method = 'ai';
+        const badge = item.querySelector('.method-badge');
+        if (badge) {
+            badge.className = 'method-badge ai';
+            badge.textContent = '[AI Mode]';
+        }
+        showSaveFeedback('单段重试成功，记得保存');
+    } catch (err) {
+        alert('单段重试失败: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '单段重试';
+    }
+}
+
+async function finalizeAndDownload() {
+    if (!state.sessionId) return;
+    if (!Object.keys(state.finalResults).length) {
+        alert('没有可导出的修改结果');
+        return;
+    }
+
+    showLoading('正在保存所有修改并生成最终文档...');
+    try {
+        const res = await fetch('/api/finalize-export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: state.sessionId,
+                final_results: state.finalResults,
+            }),
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        state.hasUnsavedEdits = false;
+        showSaveFeedback(`已保存 ${data.applied_count} 段修改`);
+        window.location.href = data.download_url;
+    } catch (err) {
+        alert('保存并导出失败: ' + err.message);
+    } finally {
+        hideLoading();
+    }
+}
+
+function showSaveFeedback(message) {
+    setStatus('active', message);
 }
 
 // ============================================================
@@ -672,6 +779,8 @@ function resetDoc() {
     state.paragraphs = [];
     state.selectedIndices.clear();
     state.round = 1;
+    state.finalResults = {};
+    state.hasUnsavedEdits = false;
 
     $('#docDropZone').style.display = '';
     $('#docInfo').style.display = 'none';
