@@ -14,6 +14,13 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+DYNAMIC_PROMPTS = [
+    '适当改变句式长短节奏，避免连续使用相同字数的短句。',
+    '在逻辑转折处，尝试使用设问句引导，增加文章的启发性。',
+    '将部分被动语态改为带有“笔者”或“本研究”等主观色彩的表达。',
+    '在结尾适当使用强调性断句，增强表达起伏。',
+]
+
 random.seed()
 
 # ============================================================
@@ -380,7 +387,8 @@ class AITransformer:
         '4. 用具体场景或设问切入，代替抽象概述\n'
         '5. 偶尔使用口语化过渡（如「说白了」「换个角度看」）增加人味\n'
         '6. 保留所有专业术语、法条编号、数据、人名、案例名，不得篡改\n'
-        '7. 不要添加原文没有的信息\n\n'
+        '7. 不要添加原文没有的信息\n'
+        '8. 严禁使用“总而言之”“综上所述”“首先/其次/最后”等典型 AI 序列连接词。\n\n'
         '直接输出改写后的段落，不要输出任何解释。'
     )
 
@@ -615,6 +623,9 @@ class AITransformer:
     def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
         system_prompt = self.SYSTEM_PROMPT
+        selected = random.sample(DYNAMIC_PROMPTS, k=min(2, len(DYNAMIC_PROMPTS)))
+        if selected:
+            system_prompt = f"{system_prompt}\n\n动态写作指令：\n- " + "\n- ".join(selected)
         if custom_prompt.strip():
             system_prompt = f"{system_prompt}\n\n附加要求：\n{custom_prompt.strip()}"
 

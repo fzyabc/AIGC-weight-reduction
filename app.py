@@ -99,7 +99,11 @@ def _sanitize_final_text(value) -> str:
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     cleaned = []
     for ch in text:
-        if ch in ('\n', '\t') or ord(ch) >= 32:
+        code = ord(ch)
+        if ch in ('\n', '\t'):
+            cleaned.append(ch)
+            continue
+        if 32 <= code <= 0xD7FF or 0xE000 <= code <= 0xFFFD or 0x10000 <= code <= 0x10FFFF:
             cleaned.append(ch)
     return ''.join(cleaned).strip()
 
@@ -265,11 +269,13 @@ def analyze():
             matched_indices[idx] = {
                 'probability': risk_info.probability,
                 'report_risk': risk_info.risk_level.value,
+                'is_low_confidence': getattr(risk_info, 'is_low_confidence', False),
             }
         for r in results:
             if r['index'] in matched_indices:
                 r['report_probability'] = matched_indices[r['index']]['probability']
                 r['report_risk'] = matched_indices[r['index']]['report_risk']
+                r['report_low_confidence'] = matched_indices[r['index']]['is_low_confidence']
     else:
         matched_indices = {}
 
@@ -371,6 +377,15 @@ def reduce():
                     custom_prompt=ai_config.get('custom_prompt', ''),
                 )
                 mode = 'ai'
+                if result.error:
+                    fallback = rule_transformer.transform(
+                        text,
+                        'high' if risk_level == 'high' else 'medium',
+                        protected_words=protected_words,
+                    )
+                    fallback.rules_applied.append('AI失败后自动切换规则降重')
+                    result = fallback
+                    mode = 'rule'
             elif risk_level == 'low':
                 result = rule_transformer.transform(
                     text,
@@ -514,23 +529,26 @@ def ai_preview():
         return _json_error('文本为空')
 
     ai = AITransformer(api_config=ai_config)
+    protected_words = _normalize_protected_words(data.get('protected_words'))
     result = ai.transform(
         text,
         risk,
-        protected_words=_normalize_protected_words(data.get('protected_words')),
+        protected_words=protected_words,
         custom_prompt=ai_config.get('custom_prompt', ''),
     )
 
     if result.error:
-        status = result.error.get('status', 502) or 502
+        fallback = Transformer(aggressiveness=3)
+        result = fallback.transform(text, risk, protected_words=protected_words)
+        result.rules_applied.append('AI失败后自动切换规则降重')
         return jsonify({
-            'error': result.error.get('message', 'AI 预览失败'),
-            'error_detail': result.error,
             'original': result.original,
             'transformed': result.transformed,
             'rules_applied': result.rules_applied,
             'change_ratio': round(result.change_ratio, 3),
-        }), status
+            'fallback': 'rule',
+            'fallback_message': '已自动转为规则降重',
+        })
 
     return jsonify({
         'original': result.original,
@@ -581,6 +599,10 @@ def ai_reduce():
             protected_words=protected_words,
             custom_prompt=ai_config.get('custom_prompt', ''),
         )
+        if result.error:
+            fallback = Transformer(aggressiveness=3)
+            result = fallback.transform(text, level_name, protected_words=protected_words)
+            result.rules_applied.append('AI失败后自动切换规则降重')
         result.paragraph_index = idx
         results.append(result)
         _update_progress(sid, current)

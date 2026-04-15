@@ -703,6 +703,13 @@ input[type="checkbox"] {
     color: var(--text);
 }
 
+.diff-added {
+    background-color: rgba(16, 185, 129, 0.2);
+    border-bottom: 1px solid rgba(16, 185, 129, 0.4);
+    padding: 0 2px;
+    border-radius: 2px;
+}
+
 .change-after.editable {
     outline: none;
     min-height: 72px;

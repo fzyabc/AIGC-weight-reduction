@@ -420,6 +420,7 @@ function renderReduceResult(data) {
         item.dataset.index = d.index;
         item.dataset.method = d.method || 'none';
         item.dataset.riskLevel = d.risk_level || 'medium';
+        item.dataset.original = d.original;
 
         item.innerHTML = `
             <div class="change-header">
@@ -432,15 +433,19 @@ function renderReduceResult(data) {
                 <button class="btn btn-small undo-btn" data-index="${d.index}" title="撤销">↶</button>
                 <button class="btn btn-small retry-btn" data-index="${d.index}">单段重试</button>
             </div>
-            <div class="change-before">${escapeHtml(d.original)}</div>
-            <div class="change-after editable" contenteditable="true" data-index="${d.index}">${escapeHtml(d.transformed)}</div>
+            <div class="change-before">${renderDiffHtml(d.original, d.transformed)}</div>
+            <div class="change-after editable" contenteditable="true" data-index="${d.index}">${renderDiffHtml(d.original, d.transformed)}</div>
         `;
 
         const editable = item.querySelector('.change-after');
+        editable.addEventListener('focus', () => {
+            editable.innerText = getCurrentFinalText(String(d.index));
+        });
         editable.addEventListener('blur', () => {
             const idx = String(d.index);
             const newText = editable.innerText;
             pushHistoryVersion(idx, newText);
+            editable.innerHTML = renderDiffHtml(item.dataset.original || d.original, newText);
             state.hasUnsavedEdits = true;
             updateDownloadButtonState();
             showSaveFeedback('已记录修改，待保存');
@@ -487,7 +492,7 @@ function undoSingleSegment(item, index) {
     history.pop();
     const previous = history[history.length - 1] || '';
     const editable = item.querySelector('.change-after');
-    editable.innerText = previous;
+    editable.innerHTML = renderDiffHtml(item.dataset.original || '', previous);
     state.hasUnsavedEdits = true;
     updateDownloadButtonState();
     showSaveFeedback('已撤销到上一版本，待保存');
@@ -521,10 +526,14 @@ async function retrySingleSegment(item, detail) {
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
-        editable.innerText = data.transformed;
+        editable.innerHTML = renderDiffHtml(item.dataset.original || detail.original, data.transformed);
         pushHistoryVersion(idx, data.transformed);
         state.hasUnsavedEdits = true;
         updateDownloadButtonState();
+
+        if (data.fallback === 'rule' || (Array.isArray(data.rules_applied) && data.rules_applied.some(r => r.includes('AI失败后自动切换规则降重')))) {
+            showSaveFeedback('AI失败，已自动转为规则降重');
+        }
 
         item.dataset.method = 'ai';
         const badge = item.querySelector('.method-badge');
@@ -549,6 +558,25 @@ function updateDownloadButtonState() {
     } else {
         btn.classList.remove('btn-warning');
     }
+}
+
+function tokenizeForDiff(text) {
+    return (text || '').split(/([，。；：、“”‘’！？,.!?()（）\s]+)/).filter(Boolean);
+}
+
+function renderDiffHtml(original, transformed) {
+    const origTokens = tokenizeForDiff(original);
+    const newTokens = tokenizeForDiff(transformed);
+    const origSet = new Set(origTokens.filter(t => t.trim()));
+
+    return newTokens.map(token => {
+        const safe = escapeHtml(token);
+        if (!token.trim()) return safe;
+        if (!origSet.has(token)) {
+            return `<span class="diff-added">${safe}</span>`;
+        }
+        return safe;
+    }).join('');
 }
 
 async function finalizeAndDownload() {
