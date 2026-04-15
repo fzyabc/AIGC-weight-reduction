@@ -399,12 +399,14 @@ function renderReduceResult(data) {
 
     state.finalResults = {};
     data.details.forEach(d => {
-        state.finalResults[String(d.index)] = d.transformed;
+        state.finalResults[String(d.index)] = [d.transformed];
     });
     state.hasUnsavedEdits = false;
 
-    $('#downloadBtn').onclick = finalizeAndDownload;
-    $('#downloadBtn').textContent = '保存所有修改并下载';
+    const downloadBtn = $('#downloadBtn');
+    downloadBtn.onclick = finalizeAndDownload;
+    downloadBtn.textContent = '保存所有修改并下载';
+    downloadBtn.classList.remove('btn-warning');
     $('#continueBtn').onclick = continueReduce;
     $('#restartBtn').onclick = resetDoc;
 
@@ -427,6 +429,7 @@ function renderReduceResult(data) {
                 <span style="font-size:12px;color:var(--text-muted)">
                     ${d.rules.join(', ')}
                 </span>
+                <button class="btn btn-small undo-btn" data-index="${d.index}" title="撤销">↶</button>
                 <button class="btn btn-small retry-btn" data-index="${d.index}">单段重试</button>
             </div>
             <div class="change-before">${escapeHtml(d.original)}</div>
@@ -434,13 +437,17 @@ function renderReduceResult(data) {
         `;
 
         const editable = item.querySelector('.change-after');
-        editable.addEventListener('input', () => {
-            state.finalResults[String(d.index)] = editable.innerText;
+        editable.addEventListener('blur', () => {
+            const idx = String(d.index);
+            const newText = editable.innerText;
+            pushHistoryVersion(idx, newText);
             state.hasUnsavedEdits = true;
+            updateDownloadButtonState();
             showSaveFeedback('已记录修改，待保存');
         });
 
         item.querySelector('.retry-btn').addEventListener('click', () => retrySingleSegment(item, d));
+        item.querySelector('.undo-btn').addEventListener('click', () => undoSingleSegment(item, d.index));
         list.appendChild(item);
     });
 }
@@ -453,6 +460,37 @@ function getMethodBadge(method) {
         return { text: '[Rule Mode]', className: 'rule' };
     }
     return { text: '[Original/Skipped]', className: 'none' };
+}
+
+function pushHistoryVersion(idx, text) {
+    if (!state.finalResults[idx]) {
+        state.finalResults[idx] = [];
+    }
+    const history = state.finalResults[idx];
+    if (history.length === 0 || history[history.length - 1] !== text) {
+        history.push(text);
+    }
+}
+
+function getCurrentFinalText(idx) {
+    const history = state.finalResults[idx] || [];
+    return history.length ? history[history.length - 1] : '';
+}
+
+function undoSingleSegment(item, index) {
+    const idx = String(index);
+    const history = state.finalResults[idx] || [];
+    if (history.length <= 1) {
+        return;
+    }
+
+    history.pop();
+    const previous = history[history.length - 1] || '';
+    const editable = item.querySelector('.change-after');
+    editable.innerText = previous;
+    state.hasUnsavedEdits = true;
+    updateDownloadButtonState();
+    showSaveFeedback('已撤销到上一版本，待保存');
 }
 
 async function retrySingleSegment(item, detail) {
@@ -484,8 +522,9 @@ async function retrySingleSegment(item, detail) {
         if (data.error) throw new Error(data.error);
 
         editable.innerText = data.transformed;
-        state.finalResults[idx] = data.transformed;
+        pushHistoryVersion(idx, data.transformed);
         state.hasUnsavedEdits = true;
+        updateDownloadButtonState();
 
         item.dataset.method = 'ai';
         const badge = item.querySelector('.method-badge');
@@ -502,12 +541,27 @@ async function retrySingleSegment(item, detail) {
     }
 }
 
+function updateDownloadButtonState() {
+    const btn = $('#downloadBtn');
+    if (!btn) return;
+    if (state.hasUnsavedEdits) {
+        btn.classList.add('btn-warning');
+    } else {
+        btn.classList.remove('btn-warning');
+    }
+}
+
 async function finalizeAndDownload() {
     if (!state.sessionId) return;
     if (!Object.keys(state.finalResults).length) {
         alert('没有可导出的修改结果');
         return;
     }
+
+    const payload = {};
+    Object.keys(state.finalResults).forEach((idx) => {
+        payload[idx] = getCurrentFinalText(idx);
+    });
 
     showLoading('正在保存所有修改并生成最终文档...');
     try {
@@ -516,14 +570,15 @@ async function finalizeAndDownload() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: state.sessionId,
-                final_results: state.finalResults,
+                final_results: payload,
             }),
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
 
         state.hasUnsavedEdits = false;
-        showSaveFeedback(`已保存 ${data.applied_count} 段修改`);
+        updateDownloadButtonState();
+        showSaveFeedback(`已保存 ${data.applied_count} 段修改`, true);
         window.location.href = data.download_url;
     } catch (err) {
         alert('保存并导出失败: ' + err.message);
@@ -532,8 +587,17 @@ async function finalizeAndDownload() {
     }
 }
 
-function showSaveFeedback(message) {
+function showSaveFeedback(message, success = false) {
     setStatus('active', message);
+    if (success) {
+        const btn = $('#downloadBtn');
+        if (!btn) return;
+        const originalText = '保存所有修改并下载';
+        btn.textContent = '✅ 导出成功';
+        setTimeout(() => {
+            btn.textContent = originalText;
+        }, 2000);
+    }
 }
 
 // ============================================================

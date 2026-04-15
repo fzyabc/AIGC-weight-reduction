@@ -92,6 +92,18 @@ def _json_error(message: str, status: int = 400, error: dict | None = None):
     return jsonify(payload), status
 
 
+def _sanitize_final_text(value) -> str:
+    """对最终导出的文本做基础清洗，防止异常控制字符注入。"""
+    text = str(value or '')
+    text = text.replace('\x00', '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    cleaned = []
+    for ch in text:
+        if ch in ('\n', '\t') or ord(ch) >= 32:
+            cleaned.append(ch)
+    return ''.join(cleaned).strip()
+
+
 def _init_progress(sid: str, total: int, label: str):
     """初始化会话进度。"""
     sessions[sid]['progress'] = {
@@ -134,8 +146,8 @@ def upload_doc():
     if not file.filename:
         return jsonify({'error': '文件名为空'}), 400
 
-    ext = Path(file.filename).suffix.lower()
-    if ext != '.docx':
+    ext = Path(file.filename).suffix.lower().strip()
+    if ext != '.docx' or not str(file.filename).lower().endswith('.docx'):
         return jsonify({'error': '仅支持 .docx 格式'}), 400
 
     sid = _session_id()
@@ -174,8 +186,8 @@ def upload_report():
         return jsonify({'error': '未选择文件'}), 400
 
     file = request.files['file']
-    ext = Path(file.filename).suffix.lower()
-    if ext != '.pdf':
+    ext = Path(file.filename).suffix.lower().strip()
+    if ext != '.pdf' or not str(file.filename).lower().endswith('.pdf'):
         return jsonify({'error': '仅支持 .pdf 格式'}), 400
 
     filename = f'{sid}_report{ext}'
@@ -676,7 +688,9 @@ def finalize_export():
             continue
         if final_text is None:
             continue
-        if replace_paragraph_text(doc, idx, str(final_text)):
+
+        safe_text = _sanitize_final_text(final_text)
+        if replace_paragraph_text(doc, idx, safe_text):
             applied_count += 1
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
