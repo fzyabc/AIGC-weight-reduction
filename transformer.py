@@ -711,6 +711,7 @@ class AITransformer:
             ],
             'temperature': self.temperature,
             'max_tokens': self.max_tokens,
+            'stream': False,
         }
 
         max_attempts = 3
@@ -729,12 +730,14 @@ class AITransformer:
                         'error': None,
                         'attempts': attempt,
                     }
+                import json as _dbg_json
+                raw_preview = _dbg_json.dumps(data, ensure_ascii=False, default=str)[:500] if data else '(empty)'
+                print(f'[AI DEBUG] invalid_response, raw data: {raw_preview}')
                 last_error = {
                     'code': 'invalid_response',
                     'status': result.get('status', 200),
-                    'message': '模型返回格式异常，缺少 choices.message.content',
+                    'message': f'模型返回格式异常，缺少 choices.message.content。响应预览: {raw_preview[:200]}',
                     'attempts': attempt,
-                    'raw_keys': str(list(data.keys()))[:100] if isinstance(data, dict) else str(type(data)),
                 }
                 break
 
