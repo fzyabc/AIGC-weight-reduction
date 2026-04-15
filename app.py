@@ -404,6 +404,7 @@ def reduce():
                 'original': result.original[:100],
                 'transformed': new_text[:100],
                 'rules': result.rules_applied + ([f'模式: {mode}'] if mode != 'skip' else ['模式: 跳过']),
+                'method': 'none' if mode == 'skip' else mode,
             })
 
     orig_name = sessions[sid].get('original_name', 'document.docx')
@@ -431,11 +432,21 @@ def reduce():
     if errors and not applied:
         status = errors[0].get('error', {}).get('status', 502) or 502
 
+    analysis_result = []
+    for mode, result in results:
+        analysis_result.append({
+            'index': result.paragraph_index,
+            'method': 'none' if mode == 'skip' else mode,
+            'risk_level': risk_map.get(result.paragraph_index, 'unknown'),
+            'has_error': bool(result.error),
+        })
+
     return jsonify({
         'success': True,
         'modified_count': len(applied),
         'error_count': len(errors),
         'details': applied,
+        'analysis': analysis_result,
         'errors': errors,
         'download_url': f'/api/download/{sid}',
         'hybrid_mode': use_hybrid,

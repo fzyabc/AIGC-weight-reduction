@@ -400,11 +400,13 @@ function renderReduceResult(data) {
     list.innerHTML = '';
 
     data.details.forEach(d => {
+        const badge = getMethodBadge(d.method);
         const item = document.createElement('div');
         item.className = 'change-item';
         item.innerHTML = `
             <div class="change-header">
                 <span class="para-index">P${d.index}</span>
+                <span class="method-badge ${badge.className}">${badge.text}</span>
                 <span class="change-arrow">→</span>
                 <span style="font-size:12px;color:var(--text-muted)">
                     ${d.rules.join(', ')}
@@ -415,6 +417,16 @@ function renderReduceResult(data) {
         `;
         list.appendChild(item);
     });
+}
+
+function getMethodBadge(method) {
+    if (method === 'ai') {
+        return { text: '[AI Mode]', className: 'ai' };
+    }
+    if (method === 'rule') {
+        return { text: '[Rule Mode]', className: 'rule' };
+    }
+    return { text: '[Original/Skipped]', className: 'none' };
 }
 
 // ============================================================
