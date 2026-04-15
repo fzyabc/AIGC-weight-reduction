@@ -668,6 +668,32 @@ class AITransformer:
             return None
         return max(0.0, min(seconds, 30.0))
 
+    @staticmethod
+    def _extract_content(data: dict) -> str:
+        """从 API 响应中提取文本内容，兼容多种格式。"""
+        if not isinstance(data, dict):
+            return ''
+        # 标准 OpenAI 格式: choices[0].message.content
+        choices = data.get('choices')
+        if isinstance(choices, list) and choices:
+            c = choices[0]
+            if isinstance(c, dict):
+                msg = c.get('message') or c.get('delta') or {}
+                if isinstance(msg, dict):
+                    txt = msg.get('content')
+                    if isinstance(txt, str) and txt.strip():
+                        return txt.strip()
+                # 兼容 text 字段
+                txt = c.get('text')
+                if isinstance(txt, str) and txt.strip():
+                    return txt.strip()
+        # 兼容 result / output / content 顶层字段
+        for key in ('result', 'output', 'content', 'response'):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ''
+
     def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
         system_prompt = self.SYSTEM_PROMPT
@@ -692,25 +718,25 @@ class AITransformer:
         last_error = None
 
         for attempt in range(1, max_attempts + 1):
-            result = self._request_json('/chat/completions', payload=payload, timeout=60)
+            result = self._request_json('/chat/completions', payload=payload, timeout=120)
             if result.get('ok'):
                 data = result.get('data', {})
-                try:
-                    content = data['choices'][0]['message']['content'].strip()
+                content = self._extract_content(data)
+                if content:
                     return {
                         'ok': True,
                         'content': content,
                         'error': None,
                         'attempts': attempt,
                     }
-                except Exception:
-                    last_error = {
-                        'code': 'invalid_response',
-                        'status': result.get('status', 200),
-                        'message': '模型返回格式异常，缺少 choices.message.content',
-                        'attempts': attempt,
-                    }
-                    break
+                last_error = {
+                    'code': 'invalid_response',
+                    'status': result.get('status', 200),
+                    'message': '模型返回格式异常，缺少 choices.message.content',
+                    'attempts': attempt,
+                    'raw_keys': str(list(data.keys()))[:100] if isinstance(data, dict) else str(type(data)),
+                }
+                break
 
             error = dict(result.get('error') or {})
             error['attempts'] = attempt
