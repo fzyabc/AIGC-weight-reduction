@@ -601,10 +601,7 @@ class AITransformer:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode('utf-8', errors='ignore')
-                try:
-                    parsed = _json.loads(raw) if raw else {}
-                except Exception:
-                    parsed = {'raw': raw}
+                parsed = self._parse_response(raw)
                 return {
                     'ok': True,
                     'status': getattr(resp, 'status', 200),
@@ -693,6 +690,53 @@ class AITransformer:
             if isinstance(val, str) and val.strip():
                 return val.strip()
         return ''
+
+    @staticmethod
+    def _parse_response(raw: str) -> dict:
+        """解析 API 响应，支持标准 JSON 和 SSE 流式格式。"""
+        import json as _json
+        if not raw or not raw.strip():
+            return {}
+        # 先尝试标准 JSON
+        try:
+            return _json.loads(raw)
+        except Exception:
+            pass
+        # SSE 流式格式: "data: {...}\ndata: {...}\n..."
+        if 'data:' not in raw:
+            return {'raw': raw}
+        collected_content = []
+        model_name = ''
+        for line in raw.split('\n'):
+            line = line.strip()
+            if not line.startswith('data:'):
+                continue
+            payload = line[5:].strip()
+            if payload == '[DONE]':
+                continue
+            try:
+                chunk = _json.loads(payload)
+            except Exception:
+                continue
+            if not model_name:
+                model_name = chunk.get('model', '')
+            choices = chunk.get('choices', [])
+            if not choices:
+                continue
+            delta = choices[0].get('delta', {})
+            text = delta.get('content', '')
+            if text:
+                collected_content.append(text)
+        if collected_content:
+            full_text = ''.join(collected_content)
+            return {
+                'choices': [{
+                    'message': {'content': full_text},
+                }],
+                'model': model_name,
+                '_parsed_from': 'sse_stream',
+            }
+        return {'raw': raw}
 
     def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
