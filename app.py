@@ -135,9 +135,23 @@ def _clear_progress(sid: str):
         sessions[sid].pop('progress', None)
 
 
+def _asset_version(*relative_parts: str) -> str:
+    """根据静态文件 mtime 生成简单版本号，避免浏览器缓存旧 JS/CSS。"""
+    try:
+        full_path = os.path.join(os.path.dirname(__file__), *relative_parts)
+        return str(int(os.path.getmtime(full_path)))
+    except OSError:
+        return str(int(time.time()))
+
+
 @app.route('/')
 def index():
-    return render_template('index.html')
+    asset_version = max(
+        int(_asset_version('static', 'app.js')),
+        int(_asset_version('static', 'style.css')),
+        int(_asset_version('templates', 'index.html')),
+    )
+    return render_template('index.html', asset_version=asset_version)
 
 
 @app.route('/api/upload', methods=['POST'])
