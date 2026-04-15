@@ -423,6 +423,36 @@ class AITransformer:
             self.max_tokens = 1536
         self.max_tokens = max(256, min(4096, self.max_tokens))
 
+    def protect_keywords(self, text: str,
+                         protected_words: Optional[list[str]] = None) -> tuple[str, dict[str, str]]:
+        """将指定术语替换为占位符，避免改写时被误伤。"""
+        if not text or not protected_words:
+            return text, {}
+        normalized = []
+        for word in protected_words:
+            w = str(word or '').strip()
+            if w and w not in normalized:
+                normalized.append(w)
+        normalized.sort(key=len, reverse=True)
+        protected_text = text
+        placeholder_map: dict[str, str] = {}
+        for word in normalized:
+            if word not in protected_text:
+                continue
+            token = f'[KEYWORD_{len(placeholder_map)}]'
+            protected_text = re.sub(re.escape(word), token, protected_text)
+            placeholder_map[token] = word
+        return protected_text, placeholder_map
+
+    def restore_keywords(self, text: str, placeholder_map: Optional[dict[str, str]] = None) -> str:
+        """将占位符还原为原始术语。"""
+        if not text or not placeholder_map:
+            return text
+        restored = text
+        for token, word in placeholder_map.items():
+            restored = restored.replace(token, word)
+        return restored
+
     def transform(self, text: str, risk_level: str = 'medium',
                   protected_words: Optional[list[str]] = None,
                   custom_prompt: str = '') -> TransformResult:
