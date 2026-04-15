@@ -1054,24 +1054,79 @@ async function runAIReduce() {
         return;
     }
 
+    const protectedWords = getProtectedWords();
     saveAIConfig();
     setStatus('working', 'AI降重中...');
-    showLoading(`AI正在改写 ${selected.length} 个段落，可能需要较长时间...`);
     startProgress(selected.length, 'AI 降重进行中');
+    startLiveProgress(selected.length, '实时 AI 降重监控');
+    prepareLiveReduceView();
     pollProgress(state.sessionId);
 
     try {
-        const res = await fetch('/api/ai-reduce', {
+        const tasks = selected.map(async (index, order) => {
+            const para = state.paragraphMap.get(index);
+            if (!para) {
+                updateLiveProgress(order + 1, selected.length);
+                return null;
+            }
+
+            try {
+                const previewRes = await fetch('/api/ai-preview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: para.full_text || para.text,
+                        risk_level: para.risk_level,
+                        protected_words: protectedWords,
+                        ...cfg,
+                    }),
+                });
+                const previewData = await previewRes.json();
+                appendParagraphToView({
+                    index,
+                    original: para.full_text || para.text,
+                    transformed: previewData.transformed || para.full_text || para.text,
+                    rules: previewData.rules_applied || [],
+                    method: previewData.fallback === 'rule' ? 'rule' : 'ai',
+                    risk_level: para.risk_level,
+                    is_low_confidence: Boolean(para.report_low_confidence),
+                    fallback: previewData.fallback === 'rule',
+                    ai_error: previewData.ai_error || null,
+                });
+            } catch {
+                appendParagraphToView({
+                    index,
+                    original: para.full_text || para.text,
+                    transformed: para.full_text || para.text,
+                    rules: ['实时 AI 预览失败，等待最终结果'],
+                    method: 'ai',
+                    risk_level: para.risk_level,
+                    is_low_confidence: Boolean(para.report_low_confidence),
+                    fallback: false,
+                    ai_error: {
+                        code: 'preview_failed',
+                        message: '实时渲染阶段调用 /api/ai-preview 失败',
+                    },
+                });
+            } finally {
+                updateLiveProgress(order + 1, selected.length);
+            }
+            return null;
+        });
+
+        const finalPromise = fetch('/api/ai-reduce', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 session_id: state.sessionId,
                 selected_indices: selected,
-                protected_words: getProtectedWords(),
+                protected_words: protectedWords,
                 ...cfg,
             }),
-        });
-        const data = await res.json();
+        }).then(res => res.json());
+
+        await Promise.all(tasks);
+        const data = await finalPromise;
         if (data.error) throw new Error(data.error);
 
         finishProgress(selected.length, selected.length, 'AI 降重已完成');
@@ -1099,6 +1154,7 @@ async function runAIReduce() {
         setStatus('', 'AI降重失败');
     } finally {
         stopProgress();
+        stopLiveProgress();
         hideLoading();
     }
 }
