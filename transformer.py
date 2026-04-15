@@ -705,9 +705,21 @@ class AITransformer:
         # SSE 流式格式: "data: {...}\ndata: {...}\n..."
         if 'data:' not in raw:
             return {'raw': raw}
+
+        # 保存原始响应用于诊断（仅保留最近一次）
+        try:
+            import os, tempfile
+            dbg_path = os.path.join(tempfile.gettempdir(), 'ai_last_sse_raw.txt')
+            with open(dbg_path, 'w', encoding='utf-8') as f:
+                f.write(raw)
+            print(f'[AI DEBUG] raw SSE saved to {dbg_path}, length={len(raw)}, lines={raw.count(chr(10))}')
+        except Exception:
+            pass
+
         collected_content = []
         model_name = ''
-        for line in raw.split('\n'):
+        # 用 \n 和 \r\n 都分割，并处理可能的多行 data
+        for line in raw.replace('\r\n', '\n').split('\n'):
             line = line.strip()
             if not line.startswith('data:'):
                 continue
@@ -727,6 +739,7 @@ class AITransformer:
             text = delta.get('content', '')
             if text:
                 collected_content.append(text)
+        print(f'[AI DEBUG] SSE parsed: {len(collected_content)} content chunks, model={model_name}')
         if collected_content:
             full_text = ''.join(collected_content)
             return {
@@ -736,6 +749,15 @@ class AITransformer:
                 'model': model_name,
                 '_parsed_from': 'sse_stream',
             }
+        # 没有解析到内容，打印前3个chunk用于诊断
+        chunk_count = 0
+        for line in raw.replace('\r\n', '\n').split('\n'):
+            line = line.strip()
+            if line.startswith('data:') and line[5:].strip() != '[DONE]':
+                chunk_count += 1
+                if chunk_count <= 3:
+                    print(f'[AI DEBUG] chunk#{chunk_count}: {line[:300]}')
+        print(f'[AI DEBUG] total SSE chunks: {chunk_count}, none had content')
         return {'raw': raw}
 
     def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
