@@ -15,57 +15,82 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-DYNAMIC_PROMPTS = [
-    '尝试把一个长句拆成两个短句，或把两个短句合成一个带从句的长句，制造长短交替的节奏感。',
-    '挑选一处用反问或设问引出下文，但不要超过一处，避免刻意。',
-    '把某个抽象概括改成具体的例子或场景描述，让读者能”看到画面”。',
-    '调整段落内部的叙述顺序：比如先说结论再展开，或先抛问题再给答案。',
-    '把”A具有B特点”改成”在B方面，A表现为……”这类句式倒装来打破模板感。',
-    '找到一处可以用简短口语衔接的地方，比如”换句话说””严格来说””仔细想想”，但全段最多用一次。',
+# ============================================================
+# DYNAMIC_PROMPTS 互斥分组
+# 每组内只能选一条，避免矛盾指令（如同时拆句和合句）
+# ============================================================
+DYNAMIC_PROMPT_GROUPS = [
+    # 组A：句子结构（拆/合互斥）
+    [
+        '尝试把一个长句拆成两个短句，制造长短交替的节奏感。',
+        '把两个相邻短句合成一个带从句的长句，让表达更紧凑。',
+    ],
+    # 组B：叙述手法
+    [
+        '挑选一处用反问或设问引出下文，但不要超过一处，避免刻意。',
+        '把某个抽象概括改成具体的例子或场景描述，让读者能”看到画面”。',
+    ],
+    # 组C：结构调整
+    [
+        '调整段落内部的叙述顺序：比如先说结论再展开，或先抛问题再给答案。',
+        '把”A具有B特点”改成”在B方面，A表现为……”这类句式倒装来打破模板感。',
+    ],
 ]
+
+
+def _pick_dynamic_prompts(k: int = 2) -> list[str]:
+    """从互斥分组中各取一条, 保证不会抽到矛盾指令"""
+    groups = [g[:] for g in DYNAMIC_PROMPT_GROUPS]
+    random.shuffle(groups)
+    picked = []
+    for group in groups:
+        if len(picked) >= k:
+            break
+        picked.append(random.choice(group))
+    return picked
+
 
 random.seed()
 
 # ============================================================
-# 替换规则库
+# 替换规则库（已清洗：移除过于口语化的替换词）
 # ============================================================
 
 SEQUENCE_CONNECTORS = {
     '首先': [
-        '从源头来看', '要说清楚这件事', '先说一个前提',
+        '从源头来看', '先说一个前提',
         '问题的起点在于', '最根本的一点是',
     ],
     '其次': [
         '接下来', '在此基础上', '沿着这个思路往下',
-        '再往下说', '第二点是',
+        '第二点是',
     ],
     '此外': [
         '还有一点', '除了这些', '另外',
-        '从另一面来看', '同时也要注意',
+        '从另一面来看',
     ],
     '最后': [
-        '说到最后', '回过头来看', '做个收尾',
-        '到这里可以说', '末了还要提一句',
+        '回过头来看', '到这里可以说',
+        '最后还要提到的是',
     ],
     '综上所述': [
         '总的来看', '回过头再看这些',
-        '把前面说的串起来', '几点综合来看',
+        '几点综合来看',
     ],
     '总而言之': [
-        '简单来讲', '归结起来', '总的来说',
-        '一句话概括', '概括地说',
+        '归结起来', '总的来说', '概括地说',
     ],
     '其一': [
-        '第一点', '先看一面', '一个方面是',
+        '第一点', '一个方面是',
     ],
     '其二': [
-        '第二点', '再看另一面', '还有一方面',
+        '第二点', '还有一方面',
     ],
     '其三': [
         '第三点', '另外还有',
     ],
     '一方面': [
-        '从一面看', '就某个角度来说', '一边是',
+        '从一面看', '就某个角度来说',
     ],
     '另一方面': [
         '换个角度', '从另一面看', '反过来看',
@@ -82,14 +107,29 @@ ACADEMIC_CONNECTORS = {
     '需要指出的是': ['要说明的是', '这里有个关键点', '必须提到的一点是'],
 }
 
-HUMAN_MARKERS = [
-    '说白了', '换句话说', '仔细想想',
-    '严格来说', '通俗地讲', '举个例子来说',
-    '这里要多说一句', '有意思的是',
-    '稍微展开一下', '往深了说',
-    '直白一点', '简单来讲',
-    '反过来想', '坦率地说', '细究起来',
+# ============================================================
+# 人味标记三级词池
+# 论文默认：TIER_ACADEMIC 全用 + TIER_SEMI 少量 + TIER_COLLOQUIAL 禁用
+# ============================================================
+MARKERS_ACADEMIC = [
+    '换句话说', '严格来说', '从这个意义上说',
+    '更具体地说', '进一步看', '换个角度看',
+    '这也说明', '需要注意', '值得关注的是',
 ]
+
+MARKERS_SEMI = [
+    '仔细想想', '举个例子来说', '有意思的是',
+    '反过来想', '细究起来',
+]
+
+MARKERS_COLLOQUIAL = [
+    '说白了', '通俗地讲', '这里要多说一句',
+    '稍微展开一下', '往深了说', '直白一点',
+    '简单来讲', '坦率地说',
+]
+
+# 向后兼容：HUMAN_MARKERS 现在默认只包含学术层 + 半口语层
+HUMAN_MARKERS = MARKERS_ACADEMIC + MARKERS_SEMI
 
 SCENARIO_TEMPLATES = [
     '设想一个具体的场景：{context}',
@@ -279,7 +319,7 @@ class Transformer:
         return text, applied
 
     def _inject_human_markers(self, text: str) -> tuple[str, list[str]]:
-        """注入人类写作痕迹——在句间自然插入口语化衔接词"""
+        """注入人类写作痕迹——三种注入形态轮换，避免固定模板"""
         applied = []
         available = [m for m in HUMAN_MARKERS if m not in self._used_markers]
         if not available:
@@ -294,12 +334,27 @@ class Transformer:
         marker = random.choice(available)
         self._used_markers.add(marker)
 
-        # 选一个中间位置的句子，在句首自然地加上衔接词
         insert_pos = random.randint(1, min(4, len(sentences) - 1))
         s = sentences[insert_pos].strip()
-        if s and not any(s.startswith(m) for m in HUMAN_MARKERS):
+        if not s or any(s.startswith(m) for m in HUMAN_MARKERS):
+            return text, applied
+
+        # 三种注入形态随机轮换
+        mode = random.choice(['prefix', 'mid', 'bridge'])
+        if mode == 'prefix':
+            # 句首插入：marker，...
             sentences[insert_pos] = marker + '，' + s
-            applied.append(f'插入衔接: {marker}')
+        elif mode == 'mid':
+            # 句中插入：找第一个逗号后插入
+            comma_pos = s.find('，')
+            if comma_pos > 0 and comma_pos < len(s) - 2:
+                sentences[insert_pos] = s[:comma_pos + 1] + marker + '，' + s[comma_pos + 1:]
+            else:
+                sentences[insert_pos] = marker + '，' + s
+        else:
+            # 独立短句桥接：marker。原句
+            sentences[insert_pos] = marker + '。' + s
+        applied.append(f'插入衔接({mode}): {marker}')
 
         text = ''.join(sentences)
         return text, applied
@@ -341,14 +396,19 @@ class Transformer:
 
 
 def _text_overlap(a: str, b: str) -> float:
-    """计算两段文本的重叠比例"""
+    """计算两段文本的重叠比例（基于 bigram，对顺序变化和结构调整敏感）"""
     if not a or not b:
         return 0.0
-    a_chars = set(a)
-    b_chars = set(b)
-    if not a_chars:
+    a_clean = re.sub(r'\s+', '', a)
+    b_clean = re.sub(r'\s+', '', b)
+    if len(a_clean) < 2:
         return 0.0
-    return len(a_chars & b_chars) / len(a_chars)
+    a_bigrams = [a_clean[i:i+2] for i in range(len(a_clean) - 1)]
+    b_bigrams = set(b_clean[i:i+2] for i in range(len(b_clean) - 1))
+    if not a_bigrams:
+        return 0.0
+    matches = sum(1 for bg in a_bigrams if bg in b_bigrams)
+    return matches / len(a_bigrams)
 
 
 # ============================================================
@@ -474,10 +534,15 @@ class AITransformer:
             'low': '【低风险段落】AI概率30-50%，轻度调整即可——改几处关键表达，不需要大动。',
         }
 
+        # 根据风险等级动态调整 temperature
+        temp_map = {'high': 0.92, 'medium': 0.80, 'low': 0.65}
+        temp_override = temp_map.get(risk_level)
+
         protected_text, placeholder_map = self.protect_keywords(text, protected_words)
         user_msg = f"{intensity_hint.get(risk_level, '')}\n\n原文：\n{protected_text}"
 
-        call_result = self._call_api(user_msg, custom_prompt=custom_prompt)
+        call_result = self._call_api(user_msg, custom_prompt=custom_prompt,
+                                     temperature_override=temp_override)
         if not call_result.get('ok'):
             err = call_result.get('error', {})
             msg = err.get('message', 'unknown error')
@@ -743,22 +808,24 @@ class AITransformer:
             }
         return {'raw': raw}
 
-    def _call_api(self, user_message: str, custom_prompt: str = '') -> dict:
+    def _call_api(self, user_message: str, custom_prompt: str = '',
+                  temperature_override: Optional[float] = None) -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
         system_prompt = self.SYSTEM_PROMPT
-        selected = random.sample(DYNAMIC_PROMPTS, k=min(2, len(DYNAMIC_PROMPTS)))
+        selected = _pick_dynamic_prompts(k=2)
         if selected:
             system_prompt = f"{system_prompt}\n\n动态写作指令：\n- " + "\n- ".join(selected)
         if custom_prompt.strip():
             system_prompt = f"{system_prompt}\n\n附加要求：\n{custom_prompt.strip()}"
 
+        temp = temperature_override if temperature_override is not None else self.temperature
         payload = {
             'model': self.model,
             'messages': [
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': user_message},
             ],
-            'temperature': self.temperature,
+            'temperature': temp,
             'max_tokens': self.max_tokens,
             'stream': False,
         }
