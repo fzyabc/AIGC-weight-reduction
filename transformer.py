@@ -38,19 +38,19 @@ DYNAMIC_PROMPT_GROUPS = [
 ]
 
 
-def _pick_dynamic_prompts(k: int = 2) -> list[str]:
+def _pick_dynamic_prompts(k: int = 2, rng: Optional[random.Random] = None) -> list[str]:
     """从互斥分组中各取一条, 保证不会抽到矛盾指令"""
+    _rng = rng or random
     groups = [g[:] for g in DYNAMIC_PROMPT_GROUPS]
-    random.shuffle(groups)
+    _rng.shuffle(groups)
     picked = []
     for group in groups:
         if len(picked) >= k:
             break
-        picked.append(random.choice(group))
+        picked.append(_rng.choice(group))
     return picked
 
 
-random.seed()
 
 # ============================================================
 # 替换规则库（已清洗：移除过于口语化的替换词）
@@ -102,7 +102,7 @@ ACADEMIC_CONNECTORS = {
     '然而': ['不过', '但实际情况是', '话虽如此', '可问题在于', '但反过来看'],
     '同时': ['在这个过程中', '伴随这一变化', '也是在这一背景下'],
     '可以看出': ['能看出来', '从中可以发现', '这说明', '由此来看'],
-    '具有重要意义': ['很关键', '在实践中很突出', '影响很大'],
+    '具有重要意义': ['具有较强的现实意义', '在实践中较为突出', '产生了显著影响'],
     '值得注意的是': ['要注意的是', '有个细节值得留意', '比较特别的是'],
     '需要指出的是': ['要说明的是', '这里有个关键点', '必须提到的一点是'],
 }
@@ -170,12 +170,14 @@ class TransformResult:
 class Transformer:
     """AIGC降重变换器"""
 
-    def __init__(self, aggressiveness: int = 2):
+    def __init__(self, aggressiveness: int = 2, seed: Optional[int] = None):
         """
         aggressiveness: 降重力度 (1=轻微, 2=中等, 3=激进)
+        seed: 随机种子，传入固定值可复现结果，用于回归测试和 A/B 对比
         """
         self.aggressiveness = aggressiveness
         self._used_markers = set()
+        self._rng = random.Random(seed)
 
     def protect_keywords(self, text: str,
                          protected_words: Optional[list[str]] = None) -> tuple[str, dict[str, str]]:
@@ -274,7 +276,7 @@ class Transformer:
             if original in text:
                 positions = [m.start() for m in re.finditer(re.escape(original), text)]
                 for pos in reversed(positions):
-                    replacement = random.choice(alternatives)
+                    replacement = self._rng.choice(alternatives)
                     text = text[:pos] + replacement + text[pos + len(original):]
                 applied.append(f'序列词替换: {original} → {replacement}')
         return text, applied
@@ -286,12 +288,12 @@ class Transformer:
             if original in text:
                 count = text.count(original)
                 if count == 1:
-                    replacement = random.choice(alternatives)
+                    replacement = self._rng.choice(alternatives)
                     text = text.replace(original, replacement, 1)
                     applied.append(f'连接词替换: {original} → {replacement}')
                 else:
                     for _ in range(count):
-                        replacement = random.choice(alternatives)
+                        replacement = self._rng.choice(alternatives)
                         text = text.replace(original, replacement, 1)
                     applied.append(f'连接词替换: {original} × {count}')
         return text, applied
@@ -331,16 +333,17 @@ class Transformer:
         if len(sentences) < 3:
             return text, applied
 
-        marker = random.choice(available)
+        marker = self._rng.choice(available)
         self._used_markers.add(marker)
 
-        insert_pos = random.randint(1, min(4, len(sentences) - 1))
+        insert_pos = self._rng.randint(1, min(4, len(sentences) - 1))
         s = sentences[insert_pos].strip()
         if not s or any(s.startswith(m) for m in HUMAN_MARKERS):
             return text, applied
 
-        # 三种注入形态随机轮换
-        mode = random.choice(['prefix', 'mid', 'bridge'])
+        # 三种注入形态随机轮换；短段落禁用 bridge 避免突兀
+        modes = ['prefix', 'mid', 'bridge'] if len(sentences) >= 5 else ['prefix', 'mid']
+        mode = self._rng.choice(modes)
         if mode == 'prefix':
             # 句首插入：marker，...
             sentences[insert_pos] = marker + '，' + s
@@ -462,9 +465,11 @@ class AITransformer:
                  api_key: str = '',
                  api_url: str = "https://api.openai.com/v1",
                  model: str = "gpt-3.5-turbo",
-                 temperature: float = 0.85):
-        """初始化 AI 变换器。"""
+                 temperature: float = 0.85,
+                 seed: Optional[int] = None):
+        """初始化 AI 变换器。seed 控制 prompt 选择的随机性，便于回归测试。"""
         cfg = api_config or {}
+        self._rng = random.Random(seed)
         self.api_key = str(cfg.get('api_key') or api_key or '').strip()
 
         raw_url = str(cfg.get('api_url') or api_url or '').strip() or 'https://api.openai.com/v1'
@@ -812,7 +817,7 @@ class AITransformer:
                   temperature_override: Optional[float] = None) -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
         system_prompt = self.SYSTEM_PROMPT
-        selected = _pick_dynamic_prompts(k=2)
+        selected = _pick_dynamic_prompts(k=2, rng=self._rng)
         if selected:
             system_prompt = f"{system_prompt}\n\n动态写作指令：\n- " + "\n- ".join(selected)
         if custom_prompt.strip():
@@ -876,44 +881,102 @@ class AITransformer:
         }
 
 
+# AI 高频禁用词（SYSTEM_PROMPT 中明确禁止的词汇）
+_BANNED_WORDS = [
+    '首先', '其次', '最后', '总而言之', '综上所述',
+    '与此同时', '除此之外', '此外', '从而', '进而',
+    '不仅如此', '值得一提的是', '说到底', '实际上',
+    '具体来看', '也就是说', '笔者认为', '不可否认的是', '坦白讲',
+]
+
+
 def analyze_ai_patterns(text: str) -> dict:
     """
     分析一段文本中的AI写作特征，返回风险指标。
-    用于诊断哪些方面需要重点修改。
+
+    维度：
+      - sequence_words: 序列连接词命中数
+      - symmetric_structures: 对称结构数
+      - generic_connectors: 学术套话命中数
+      - long_sentences: 超长句数量
+      - human_markers: 人味标记数（减分项）
+      - banned_words: 禁用词命中数（新）
+      - rhetorical_questions: 设问句数量（新）
+      - marker_repeats: marker 重复使用次数（新）
+      - sentence_length_variance: 句长标准差（新，越小越像 AI）
+      - risk_score: 综合风险分 0-100
     """
-    indicators = {
+    indicators: dict[str, float] = {
         'sequence_words': 0,
         'symmetric_structures': 0,
         'generic_connectors': 0,
         'long_sentences': 0,
         'human_markers': 0,
+        'banned_words': 0,
+        'rhetorical_questions': 0,
+        'marker_repeats': 0,
+        'sentence_length_variance': 0.0,
         'risk_score': 0,
     }
 
+    # 1. 序列连接词
     for word in SEQUENCE_CONNECTORS:
         indicators['sequence_words'] += text.count(word)
 
+    # 2. 对称结构
     semicolons = text.count('；')
     if semicolons >= 3:
         indicators['symmetric_structures'] += 1
     parallel_patterns = len(re.findall(r'(，\S{1,3})(.*?\1)', text))
     indicators['symmetric_structures'] += parallel_patterns
 
+    # 3. 学术套话
     for word in ACADEMIC_CONNECTORS:
         indicators['generic_connectors'] += text.count(word)
 
+    # 4. 超长句
     long_sents = re.findall(r'[^。！？]{80,}[。！？]', text)
     indicators['long_sentences'] = len(long_sents)
 
+    # 5. 人味标记（减分项）
     for marker in HUMAN_MARKERS:
         if marker in text:
             indicators['human_markers'] += 1
+
+    # 6. 禁用词命中
+    for word in _BANNED_WORDS:
+        indicators['banned_words'] += text.count(word)
+
+    # 7. 设问句频率
+    indicators['rhetorical_questions'] = len(re.findall(r'[^。！？]*？', text))
+
+    # 8. marker 重复率：同一 marker 出现 ≥2 次即计入
+    for marker in HUMAN_MARKERS:
+        cnt = text.count(marker)
+        if cnt >= 2:
+            indicators['marker_repeats'] += cnt - 1
+
+    # 9. 句长方差：方差越小越像 AI 的均匀输出
+    sentences = [s.strip() for s in re.split(r'[。！？]', text) if s.strip()]
+    if len(sentences) >= 3:
+        lengths = [len(s) for s in sentences]
+        mean_len = sum(lengths) / len(lengths)
+        variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
+        indicators['sentence_length_variance'] = round(variance ** 0.5, 1)  # 标准差
+
+    # 综合评分
+    std_dev = indicators['sentence_length_variance']
+    low_variance_penalty = max(0, 15 - std_dev) if len(sentences) >= 3 else 0
 
     risk = (
         indicators['sequence_words'] * 15
         + indicators['symmetric_structures'] * 20
         + indicators['generic_connectors'] * 10
         + indicators['long_sentences'] * 10
+        + indicators['banned_words'] * 20
+        + max(0, indicators['rhetorical_questions'] - 1) * 12
+        + indicators['marker_repeats'] * 8
+        + low_variance_penalty
         - indicators['human_markers'] * 15
     )
     indicators['risk_score'] = max(0, min(100, risk))
