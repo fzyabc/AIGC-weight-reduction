@@ -21,9 +21,11 @@ from doc_handler import (
     get_content_paragraphs, analyze_document,
 )
 from transformer import (
-    Transformer, AITransformer, TransformResult,
+    Transformer, AITransformer, TransformResult, RewriteStrategy,
     analyze_ai_patterns, get_strategy_description,
 )
+from detector import AIGCDetector, DetectionReport
+from loop_engine import LoopEngine, LoopConfig, RoundResult
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
@@ -272,6 +274,11 @@ def analyze():
     doc, paragraphs = read_docx(sessions[sid]['doc_path'])
     content = get_content_paragraphs(paragraphs)
 
+    # 如果配置了检测 API，优先使用真实检测
+    detect_config = sessions[sid].get('detect_config')
+    detector = AIGCDetector(api_config=detect_config) if detect_config else None
+    use_real_detect = detector and detector.is_configured()
+
     results = []
     for para in content:
         if para.word_count < min_length:
@@ -279,21 +286,41 @@ def analyze():
         if skip_english and _is_english(para.text):
             continue
 
-        indicators = analyze_ai_patterns(para.text)
-        if indicators['risk_score'] > 20:
-            level = 'high' if indicators['risk_score'] >= 60 else (
-                'medium' if indicators['risk_score'] >= 40 else 'low')
+        if use_real_detect:
+            det = detector.detect_paragraph(para.text)
+            score = det.ai_probability
+            level = det.risk_level
+            if score <= 20:
+                continue
             results.append({
                 'index': para.index,
                 'text': para.text[:200] + ('...' if len(para.text) > 200 else ''),
                 'full_text': para.text,
-                'risk_score': indicators['risk_score'],
+                'risk_score': score,
                 'risk_level': level,
-                'sequence_words': indicators['sequence_words'],
-                'symmetric_structures': indicators['symmetric_structures'],
-                'long_sentences': indicators['long_sentences'],
+                'sequence_words': 0,
+                'symmetric_structures': 0,
+                'long_sentences': 0,
                 'word_count': para.word_count,
+                'detect_source': 'api',
             })
+        else:
+            indicators = analyze_ai_patterns(para.text)
+            if indicators['risk_score'] > 20:
+                level = 'high' if indicators['risk_score'] >= 60 else (
+                    'medium' if indicators['risk_score'] >= 40 else 'low')
+                results.append({
+                    'index': para.index,
+                    'text': para.text[:200] + ('...' if len(para.text) > 200 else ''),
+                    'full_text': para.text,
+                    'risk_score': indicators['risk_score'],
+                    'risk_level': level,
+                    'sequence_words': indicators['sequence_words'],
+                    'symmetric_structures': indicators['symmetric_structures'],
+                    'long_sentences': indicators['long_sentences'],
+                    'word_count': para.word_count,
+                    'detect_source': 'local',
+                })
 
     results.sort(key=lambda x: x['risk_score'], reverse=True)
 
@@ -866,6 +893,226 @@ def _is_english(text: str) -> bool:
         return False
     ascii_count = sum(1 for c in text if ord(c) < 128)
     return ascii_count / len(text) > 0.7
+
+
+# ============================================================
+# 检测 API 配置 & 真实检测 & 多轮闭环降重
+# ============================================================
+
+def _normalize_detect_config(raw: dict | None) -> dict:
+    """归一化检测 API 配置。"""
+    raw = raw or {}
+    platform = str(raw.get('platform', 'custom')).strip()
+    cfg = {
+        'platform': platform,
+        'api_url': str(raw.get('api_url') or '').strip(),
+        'api_key': str(raw.get('api_key') or '').strip(),
+        'auth_header': str(raw.get('auth_header') or '').strip() or None,
+        'request_body_template': raw.get('request_body_template'),
+        'response_mapping': raw.get('response_mapping'),
+        'timeout': int(raw.get('timeout', 30)),
+    }
+    # 本地模型额外参数
+    if platform == 'local':
+        cfg['model_name'] = str(raw.get('model_name', 'Hello-SimpleAI/chatgpt-detector-roberta-chinese')).strip()
+    return cfg
+
+
+@app.route('/api/detect-config', methods=['POST'])
+def detect_config():
+    """保存并测试检测 API 配置。"""
+    data = request.get_json() or {}
+    sid = data.get('session_id')
+    if not sid or sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    cfg = _normalize_detect_config(data.get('detect_config') or data)
+    detector = AIGCDetector(api_config=cfg)
+
+    # 测试连接
+    test = detector.test_connection()
+    sessions[sid]['detect_config'] = cfg
+
+    return jsonify({
+        'success': test['ok'],
+        'message': test['message'],
+        'test_result': test.get('test_result'),
+        'platform': cfg['platform'],
+    })
+
+
+@app.route('/api/detect', methods=['POST'])
+def detect():
+    """用真实检测 API 评估当前文档。"""
+    data = request.get_json() or {}
+    sid = data.get('session_id')
+    if not sid or sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    detect_cfg = sessions[sid].get('detect_config')
+    if not detect_cfg:
+        return _json_error('未配置检测 API，请先调用 /api/detect-config')
+
+    detector = AIGCDetector(api_config=detect_cfg)
+    if not detector.is_configured():
+        return _json_error('检测 API 配置不完整')
+
+    doc, paragraphs = read_docx(sessions[sid]['doc_path'])
+    content = get_content_paragraphs(paragraphs)
+    texts = [p.text for p in content if p.word_count >= 15 and not _is_english(p.text)]
+
+    _init_progress(sid, len(texts), 'AIGC检测进行中')
+
+    def on_progress(current, total):
+        _update_progress(sid, current, label=f'检测中 ({current}/{total})')
+
+    report = detector.detect_document(texts)
+    _update_progress(sid, len(texts), label='检测完成', done=True)
+
+    para_results = []
+    for det in report.paragraph_results:
+        para_results.append({
+            'text': det.text[:200] + ('...' if len(det.text) > 200 else ''),
+            'full_text': det.text,
+            'ai_probability': det.ai_probability,
+            'risk_level': det.risk_level,
+            'cached': det.cached,
+        })
+
+    sessions[sid]['last_detection'] = {
+        'overall_rate': report.overall_rate,
+        'paragraph_count': len(para_results),
+    }
+
+    return jsonify({
+        'overall_rate': report.overall_rate,
+        'paragraph_count': len(para_results),
+        'paragraphs': para_results,
+    })
+
+
+@app.route('/api/loop-reduce', methods=['POST'])
+def loop_reduce():
+    """启动多轮闭环降重。"""
+    try:
+        return _loop_reduce_inner()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return _json_error(f'闭环降重异常: {e}', 500)
+
+
+def _loop_reduce_inner():
+    data = request.get_json() or {}
+    sid = data.get('session_id')
+    if not sid or sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    ai_config = _normalize_ai_config(data.get('ai_config') or data)
+    if not ai_config['api_key']:
+        return _json_error('AI API Key 不能为空')
+
+    detect_cfg = sessions[sid].get('detect_config')
+    detector = AIGCDetector(api_config=detect_cfg)
+
+    protected_words = _normalize_protected_words(data.get('protected_words'))
+    loop_config = LoopConfig(
+        max_rounds=int(data.get('max_rounds', 5)),
+        target_rate=float(data.get('target_rate', 15.0)),
+        paragraph_target=float(data.get('paragraph_target', 30.0)),
+        early_stop_delta=float(data.get('early_stop_delta', 3.0)),
+        protected_words=protected_words,
+        custom_prompt=ai_config.get('custom_prompt', ''),
+    )
+
+    ai_transformer = AITransformer(api_config=ai_config)
+    engine = LoopEngine(detector, ai_transformer, loop_config)
+
+    # 保存引擎引用以支持 loop-stop
+    sessions[sid]['loop_engine'] = engine
+    sessions[sid]['loop_state'] = {'running': True, 'current_round': 0, 'history': []}
+
+    doc, paragraphs_raw = read_docx(sessions[sid]['doc_path'])
+    content = get_content_paragraphs(paragraphs_raw)
+    texts = [p.text for p in content if p.word_count >= 15 and not _is_english(p.text)]
+
+    _init_progress(sid, loop_config.max_rounds, '闭环降重启动中')
+
+    def on_progress(round_num, total_rounds, current_rate, status_msg):
+        sessions[sid]['loop_state']['current_round'] = round_num
+        _update_progress(sid, round_num, label=status_msg)
+
+    history = engine.run(texts, progress_callback=on_progress)
+
+    # 将改写后的文本写回文档
+    content_paragraphs = [p for p in content if p.word_count >= 15 and not _is_english(p.text)]
+    for i, para_info in enumerate(content_paragraphs):
+        if i < len(texts):
+            replace_paragraph_text(doc, para_info.index, texts[i])
+
+    orig_name = sessions[sid].get('original_name', 'document.docx')
+    stem = Path(orig_name).stem
+    out_filename = f'{sid}_{stem}_闭环降重版.docx'
+    out_path = os.path.join(app.config['OUTPUT_FOLDER'], out_filename)
+    save_docx(doc, out_path)
+
+    sessions[sid]['output_path'] = out_path
+    sessions[sid]['output_filename'] = f'{stem}_闭环降重版.docx'
+    sessions[sid]['loop_state']['running'] = False
+    sessions[sid]['loop_state']['history'] = [
+        {
+            'round': rr.round_num,
+            'strategy': rr.strategy.value,
+            'rate_before': rr.rate_before,
+            'rate_after': rr.rate_after,
+            'paragraphs_rewritten': rr.paragraphs_rewritten,
+        }
+        for rr in history
+    ]
+
+    _update_progress(sid, len(history), label='闭环降重完成', done=True)
+
+    final_rate = history[-1].rate_after if history else 0
+
+    return jsonify({
+        'success': True,
+        'total_rounds': len(history),
+        'final_rate': final_rate,
+        'history': sessions[sid]['loop_state']['history'],
+        'download_url': f'/api/download/{sid}',
+    })
+
+
+@app.route('/api/loop-progress/<sid>')
+def loop_progress(sid):
+    """获取闭环降重进度。"""
+    if sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    loop_state = sessions[sid].get('loop_state', {})
+    progress_data = sessions[sid].get('progress', {})
+
+    return jsonify({
+        'running': loop_state.get('running', False),
+        'current_round': loop_state.get('current_round', 0),
+        'history': loop_state.get('history', []),
+        'progress': progress_data,
+    })
+
+
+@app.route('/api/loop-stop', methods=['POST'])
+def loop_stop():
+    """提前终止闭环降重。"""
+    data = request.get_json() or {}
+    sid = data.get('session_id')
+    if not sid or sid not in sessions:
+        return _json_error('无效的会话ID')
+
+    engine = sessions[sid].get('loop_engine')
+    if engine:
+        engine.request_stop()
+
+    return jsonify({'success': True, 'message': '已发送停止信号'})
 
 
 if __name__ == '__main__':

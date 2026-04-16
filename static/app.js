@@ -13,6 +13,10 @@ const state = {
   selectedIndices: new Set(),
   round: 1,
   aiEnabled: false,
+  detectEnabled: false,
+  detectPlatform: "local",
+  loopRunning: false,
+  loopPollingTimer: null,
   progress: {
     current: 0,
     total: 0,
@@ -37,6 +41,9 @@ document.addEventListener("DOMContentLoaded", () => {
   initActionButtons();
   initReuploadButtons();
   initAISection();
+  initDetectSection();
+  initLoopButton();
+  loadDetectConfig();
   window.__AIGC_FRONTEND_BUILD__ =
     document.body.dataset.frontendVersion || "unknown";
   console.log(
@@ -212,6 +219,7 @@ async function runAnalyze() {
     $("#reduceResult").style.display = "none";
     $("#reduceBtn").disabled = false;
     if (state.aiEnabled) $("#aiReduceBtn").disabled = false;
+    updateLoopButtonVisibility();
     $("#exportBtn").style.display = "inline-flex";
 
     setStatus("active", `发现 ${data.total_flagged} 个风险段落`);
@@ -978,6 +986,7 @@ function initAISection() {
     if (!toggle.checked) {
       aiBtn.disabled = true;
     }
+    updateLoopButtonVisibility();
   });
 
   toggleKeyBtn.addEventListener("click", () => {
@@ -1275,6 +1284,9 @@ function resetDoc() {
   $("#analyzeBtn").disabled = true;
   $("#reduceBtn").disabled = true;
   $("#aiReduceBtn").disabled = true;
+  $("#loopReduceBtn").disabled = true;
+  $("#loopReduceBtn").style.display = "none";
+  $("#loopResultSummary").style.display = "none";
   setStatus("", "等待上传");
 }
 
@@ -1442,6 +1454,401 @@ function pollProgress(sessionId) {
       }
     }
   }, 350);
+}
+
+// ============================================================
+// AIGC 检测配置
+// ============================================================
+function initDetectSection() {
+  const toggle = $("#detectEnabled");
+  const config = $("#detectConfig");
+  const loopConfigSection = $("#loopConfigSection");
+  const testBtn = $("#testDetectBtn");
+
+  toggle.addEventListener("change", () => {
+    state.detectEnabled = toggle.checked;
+    config.style.display = toggle.checked ? "flex" : "none";
+    loopConfigSection.style.display = toggle.checked ? "" : "none";
+    updateLoopButtonVisibility();
+  });
+
+  // 平台选择器
+  $$("#detectPlatformSelector .level-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $$("#detectPlatformSelector .level-btn").forEach((b) =>
+        b.classList.remove("active"),
+      );
+      btn.classList.add("active");
+      state.detectPlatform = btn.dataset.platform;
+      showDetectFields(btn.dataset.platform);
+    });
+  });
+
+  testBtn.addEventListener("click", testDetection);
+}
+
+function showDetectFields(platform) {
+  $("#detectFieldsLocal").style.display = platform === "local" ? "" : "none";
+  $("#detectFieldsGptzero").style.display =
+    platform === "gptzero" ? "" : "none";
+  $("#detectFieldsCustom").style.display = platform === "custom" ? "" : "none";
+}
+
+function getDetectConfig() {
+  const platform = state.detectPlatform;
+  const cfg = { platform };
+  if (platform === "local") {
+    cfg.model_name =
+      $("#detectModelName").value.trim() ||
+      "Hello-SimpleAI/chatgpt-detector-roberta-chinese";
+  } else if (platform === "gptzero") {
+    cfg.api_key = $("#detectGptzeroKey").value.trim();
+  } else {
+    cfg.api_url = $("#detectApiUrl").value.trim();
+    cfg.api_key = $("#detectApiKey").value.trim();
+    const authHeader = $("#detectAuthHeader").value.trim();
+    if (authHeader) cfg.auth_header = authHeader;
+  }
+  return cfg;
+}
+
+function getLoopConfig() {
+  return {
+    max_rounds: parseInt($("#loopMaxRounds").value) || 5,
+    target_rate: parseFloat($("#loopTargetRate").value) || 15,
+    paragraph_target: parseFloat($("#loopParaTarget").value) || 30,
+    early_stop_delta: parseFloat($("#loopEarlyStopDelta").value) || 3,
+  };
+}
+
+async function testDetection() {
+  if (!state.sessionId) {
+    alert("请先上传文档");
+    return;
+  }
+
+  const cfg = getDetectConfig();
+  const testResult = $("#detectTestResult");
+  const statusEl = $("#detectStatus");
+  testResult.style.display = "block";
+  testResult.className = "test-result";
+  testResult.textContent = "测试中...";
+
+  try {
+    const res = await fetch("/api/detect-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        detect_config: cfg,
+      }),
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      testResult.className = "test-result ok";
+      testResult.textContent = `连接成功! 平台: ${data.platform}`;
+      statusEl.textContent = "已连接";
+      statusEl.className = "ai-status ok";
+      saveDetectConfig();
+    } else {
+      testResult.className = "test-result fail";
+      testResult.textContent = `连接失败: ${data.message || "未知错误"}`;
+      statusEl.textContent = "未连接";
+      statusEl.className = "ai-status fail";
+    }
+  } catch (err) {
+    testResult.className = "test-result fail";
+    testResult.textContent = `请求失败: ${err.message}`;
+    statusEl.textContent = "未连接";
+    statusEl.className = "ai-status fail";
+  }
+}
+
+function saveDetectConfig() {
+  try {
+    localStorage.setItem(
+      "aigc_detect_enabled",
+      state.detectEnabled ? "1" : "0",
+    );
+    localStorage.setItem("aigc_detect_platform", state.detectPlatform);
+    const cfg = getDetectConfig();
+    localStorage.setItem("aigc_detect_config", JSON.stringify(cfg));
+    const loopCfg = getLoopConfig();
+    localStorage.setItem("aigc_loop_config", JSON.stringify(loopCfg));
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadDetectConfig() {
+  try {
+    const enabled = localStorage.getItem("aigc_detect_enabled");
+    const platform = localStorage.getItem("aigc_detect_platform");
+    const cfgStr = localStorage.getItem("aigc_detect_config");
+    const loopStr = localStorage.getItem("aigc_loop_config");
+
+    if (platform) {
+      state.detectPlatform = platform;
+      $$("#detectPlatformSelector .level-btn").forEach((b) => {
+        b.classList.toggle("active", b.dataset.platform === platform);
+      });
+      showDetectFields(platform);
+    }
+
+    if (cfgStr) {
+      const cfg = JSON.parse(cfgStr);
+      if (cfg.model_name) $("#detectModelName").value = cfg.model_name;
+      if (cfg.api_key && cfg.platform === "gptzero")
+        $("#detectGptzeroKey").value = cfg.api_key;
+      if (cfg.api_url) $("#detectApiUrl").value = cfg.api_url;
+      if (cfg.api_key && cfg.platform === "custom")
+        $("#detectApiKey").value = cfg.api_key;
+      if (cfg.auth_header) $("#detectAuthHeader").value = cfg.auth_header;
+    }
+
+    if (loopStr) {
+      const lc = JSON.parse(loopStr);
+      if (lc.max_rounds) $("#loopMaxRounds").value = lc.max_rounds;
+      if (lc.target_rate) $("#loopTargetRate").value = lc.target_rate;
+      if (lc.paragraph_target) $("#loopParaTarget").value = lc.paragraph_target;
+      if (lc.early_stop_delta)
+        $("#loopEarlyStopDelta").value = lc.early_stop_delta;
+    }
+
+    if (enabled === "1") {
+      $("#detectEnabled").checked = true;
+      state.detectEnabled = true;
+      $("#detectConfig").style.display = "flex";
+      $("#loopConfigSection").style.display = "";
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+// ============================================================
+// 闭环降重
+// ============================================================
+function initLoopButton() {
+  $("#loopReduceBtn").addEventListener("click", runLoopReduce);
+  $("#loopStopBtn").addEventListener("click", stopLoop);
+}
+
+function updateLoopButtonVisibility() {
+  const btn = $("#loopReduceBtn");
+  const show = state.aiEnabled && state.detectEnabled;
+  btn.style.display = show ? "" : "none";
+  if (show && state.sessionId && state.paragraphs.length > 0) {
+    btn.disabled = false;
+  } else {
+    btn.disabled = true;
+  }
+}
+
+async function runLoopReduce() {
+  if (!state.sessionId) return;
+
+  const aiCfg = getAIConfig();
+  if (!aiCfg.api_key) {
+    alert("请先填写 AI API Key");
+    return;
+  }
+
+  const detectCfg = getDetectConfig();
+  // 先保存检测配置到后端 session
+  try {
+    const cfgRes = await fetch("/api/detect-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        detect_config: detectCfg,
+      }),
+    });
+    const cfgData = await cfgRes.json();
+    if (!cfgData.success) {
+      alert("检测API配置失败: " + (cfgData.message || "未知错误"));
+      return;
+    }
+  } catch (err) {
+    alert("检测API配置请求失败: " + err.message);
+    return;
+  }
+
+  const loopCfg = getLoopConfig();
+  const protectedWords = getProtectedWords();
+  saveAIConfig();
+  saveDetectConfig();
+
+  state.loopRunning = true;
+  setStatus("working", "闭环降重中...");
+
+  // 隐藏分析结果，显示闭环进度面板
+  $("#resultsArea").style.display = "none";
+  $("#reduceResult").style.display = "none";
+  showLoopProgress();
+
+  // 启动轮询
+  startLoopPolling();
+
+  try {
+    // 阻塞调用 /api/loop-reduce（同步后端），同时轮询进度
+    const res = await fetch("/api/loop-reduce", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: state.sessionId,
+        ai_config: aiCfg,
+        protected_words: protectedWords,
+        ...loopCfg,
+      }),
+    });
+    const data = await res.json();
+
+    stopLoopPolling();
+    state.loopRunning = false;
+
+    if (data.error) throw new Error(data.error);
+
+    hideLoopProgress();
+    renderLoopResult(data);
+
+    $("#reduceResult").style.display = "block";
+    setStatus(
+      "active",
+      `闭环降重完成! 最终检测率 ${data.final_rate.toFixed(1)}%`,
+    );
+  } catch (err) {
+    stopLoopPolling();
+    state.loopRunning = false;
+    hideLoopProgress();
+    alert("闭环降重失败: " + err.message);
+    setStatus("", "闭环降重失败");
+  }
+}
+
+function startLoopPolling() {
+  if (state.loopPollingTimer) clearInterval(state.loopPollingTimer);
+  state.loopPollingTimer = setInterval(async () => {
+    if (!state.sessionId || !state.loopRunning) return;
+    try {
+      const res = await fetch(`/api/loop-progress/${state.sessionId}`);
+      const data = await res.json();
+      updateLoopProgressUI(data);
+    } catch {
+      /* ignore transient errors */
+    }
+  }, 500);
+}
+
+function stopLoopPolling() {
+  if (state.loopPollingTimer) {
+    clearInterval(state.loopPollingTimer);
+    state.loopPollingTimer = null;
+  }
+}
+
+function showLoopProgress() {
+  $("#loopProgressPanel").style.display = "";
+  $("#loopProgressFill").style.width = "0%";
+  $("#loopProgressLabel").textContent = "正在初始检测...";
+  $("#loopTimeline").innerHTML = "";
+}
+
+function hideLoopProgress() {
+  $("#loopProgressPanel").style.display = "none";
+}
+
+function updateLoopProgressUI(data) {
+  const progress = data.progress || {};
+  const maxRounds = parseInt($("#loopMaxRounds").value) || 5;
+  const currentRound = data.current_round || 0;
+  const pct = Math.min(100, (currentRound / maxRounds) * 100);
+
+  $("#loopProgressFill").style.width = `${pct}%`;
+  $("#loopProgressLabel").textContent =
+    progress.label || `第 ${currentRound} 轮进行中...`;
+}
+
+async function stopLoop() {
+  if (!state.sessionId) return;
+  try {
+    await fetch("/api/loop-stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: state.sessionId }),
+    });
+    $("#loopProgressLabel").textContent = "正在停止...";
+  } catch {
+    /* ignore */
+  }
+}
+
+function renderLoopResult(data) {
+  const summary = $("#loopResultSummary");
+  const history = data.history || [];
+
+  if (history.length === 0) {
+    summary.style.display = "none";
+    $("#reduceInfo").textContent = "文档检测率已低于目标，无需改写";
+    // 仍然设置下载按钮
+    if (data.download_url) {
+      const downloadBtn = $("#downloadBtn");
+      downloadBtn.onclick = () => {
+        window.location.href = data.download_url;
+      };
+    }
+    return;
+  }
+
+  summary.style.display = "";
+
+  const firstRate = history[0].rate_before;
+  const finalRate = history[history.length - 1].rate_after;
+
+  $("#loopInitRate").textContent = firstRate.toFixed(1) + "%";
+  $("#loopFinalRate").textContent = finalRate.toFixed(1) + "%";
+  $("#loopTotalRounds").textContent = history.length;
+
+  // 渲染轮次时间线
+  const timeline = $("#loopHistoryTimeline");
+  timeline.innerHTML = history
+    .map(
+      (h) => `
+    <div class="loop-round-card">
+      <div>
+        <span class="round-label">第${h.round}轮</span>
+        <span class="round-strategy">${h.strategy} · 改写${h.paragraphs_rewritten}段</span>
+      </div>
+      <div class="round-rate">
+        <span class="rate-before">${h.rate_before.toFixed(1)}%</span>
+        <span>→</span>
+        <span class="rate-after">${h.rate_after.toFixed(1)}%</span>
+      </div>
+    </div>
+  `,
+    )
+    .join("");
+
+  // 设置结果区域
+  $("#reduceInfo").textContent =
+    `闭环降重 ${history.length} 轮: ${firstRate.toFixed(1)}% → ${finalRate.toFixed(1)}%`;
+
+  const downloadBtn = $("#downloadBtn");
+  downloadBtn.onclick = () => {
+    window.location.href = data.download_url;
+  };
+  downloadBtn.textContent = "下载降重文档";
+  downloadBtn.classList.remove("btn-warning");
+
+  $("#continueBtn").onclick = continueReduce;
+  $("#restartBtn").onclick = resetDoc;
+
+  // 清空普通降重的changeList
+  $("#changeList").innerHTML = "";
+  const fallbackNotice = $("#fallbackNotice");
+  if (fallbackNotice) fallbackNotice.style.display = "none";
 }
 
 function escapeHtml(str) {

@@ -209,6 +209,96 @@
                     </div>
                 </section>
 
+                <!-- AIGC 检测配置 -->
+                <section class="card" id="detectSection">
+                    <div class="card-header">
+                        <span class="step-num detect-num">D</span>
+                        <h3>AIGC检测配置 <small>(闭环必填)</small></h3>
+                    </div>
+                    <div class="ai-toggle-row">
+                        <label class="toggle-label">
+                            <input type="checkbox" id="detectEnabled">
+                            <span>启用检测API</span>
+                        </label>
+                        <span class="ai-status" id="detectStatus"></span>
+                    </div>
+                    <div class="detect-config" id="detectConfig" style="display:none">
+                        <div class="setting-group">
+                            <label>检测平台</label>
+                            <div class="level-selector" id="detectPlatformSelector">
+                                <button class="level-btn active" data-platform="local">本地模型</button>
+                                <button class="level-btn" data-platform="gptzero">GPTZero</button>
+                                <button class="level-btn" data-platform="custom">自定义API</button>
+                            </div>
+                        </div>
+                        <div class="detect-fields" id="detectFieldsLocal">
+                            <div class="setting-group">
+                                <label>模型名</label>
+                                <input type="text" id="detectModelName" class="input-text"
+                                       value="Hello-SimpleAI/chatgpt-detector-roberta-chinese">
+                                <div class="input-hint">HuggingFace 模型路径，首次加载需下载（免费）</div>
+                            </div>
+                        </div>
+                        <div class="detect-fields" id="detectFieldsGptzero" style="display:none">
+                            <div class="setting-group">
+                                <label>GPTZero API Key</label>
+                                <input type="password" id="detectGptzeroKey" class="input-text"
+                                       placeholder="API Key">
+                            </div>
+                        </div>
+                        <div class="detect-fields" id="detectFieldsCustom" style="display:none">
+                            <div class="setting-group">
+                                <label>API URL</label>
+                                <input type="text" id="detectApiUrl" class="input-text"
+                                       placeholder="https://api.example.com/detect">
+                            </div>
+                            <div class="setting-group">
+                                <label>API Key</label>
+                                <input type="password" id="detectApiKey" class="input-text"
+                                       placeholder="Bearer token">
+                            </div>
+                            <div class="setting-group">
+                                <label>Auth Header</label>
+                                <input type="text" id="detectAuthHeader" class="input-text"
+                                       placeholder="Authorization（默认）">
+                            </div>
+                        </div>
+                        <button class="btn btn-small btn-test" id="testDetectBtn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                                <polyline points="22 4 12 14.01 9 11.01"/>
+                            </svg>
+                            测试检测连接
+                        </button>
+                        <div class="test-result" id="detectTestResult" style="display:none"></div>
+                    </div>
+                </section>
+
+                <!-- 闭环降重参数 -->
+                <section class="card" id="loopConfigSection" style="display:none">
+                    <div class="card-header">
+                        <span class="step-num detect-num">L</span>
+                        <h3>闭环降重参数</h3>
+                    </div>
+                    <div class="setting-group">
+                        <label>最大轮次</label>
+                        <input type="number" id="loopMaxRounds" class="input-number" value="5" min="1" max="10">
+                    </div>
+                    <div class="setting-group">
+                        <label>目标AIGC率 (%)</label>
+                        <input type="number" id="loopTargetRate" class="input-number" value="15" min="0" max="100" step="1">
+                    </div>
+                    <div class="setting-group">
+                        <label>单段目标 (%)</label>
+                        <input type="number" id="loopParaTarget" class="input-number" value="30" min="0" max="100" step="1">
+                    </div>
+                    <div class="setting-group">
+                        <label>收敛阈值 (%)</label>
+                        <input type="number" id="loopEarlyStopDelta" class="input-number" value="3" min="0" max="20" step="0.5">
+                        <div class="input-hint">连续两轮改善低于此值则自动停止</div>
+                    </div>
+                </section>
+
                 <section class="card" id="advancedReduceSection">
                     <div class="card-header">
                         <span class="step-num">4</span>
@@ -242,6 +332,13 @@
                             <path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/>
                         </svg>
                         AI 降重
+                    </button>
+                    <button class="btn btn-loop" id="loopReduceBtn" disabled style="display:none">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                            <polyline points="22 2 22 8 16 8"/>
+                        </svg>
+                        闭环降重
                     </button>
                 </div>
             </aside>
@@ -332,6 +429,24 @@
                             </button>
                         </div>
                     </div>
+                    <div class="loop-result-summary" id="loopResultSummary" style="display:none">
+                        <h3>闭环降重结果</h3>
+                        <div class="loop-result-stats">
+                            <div class="stat-card">
+                                <div class="stat-number" id="loopInitRate">-</div>
+                                <div class="stat-label">初始检测率</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-number green" id="loopFinalRate">-</div>
+                                <div class="stat-label">最终检测率</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-number" id="loopTotalRounds">-</div>
+                                <div class="stat-label">总轮次</div>
+                            </div>
+                        </div>
+                        <div class="loop-history-timeline" id="loopHistoryTimeline"></div>
+                    </div>
                     <div class="fallback-notice" id="fallbackNotice" style="display:none">
                         <strong>引擎状态：</strong>
                         <span id="fallbackNoticeText">已自动切换为规则降重兜底</span>
@@ -355,6 +470,19 @@
                     <div class="live-progress-bar">
                         <div class="live-progress-fill" id="liveProgressFill"></div>
                     </div>
+                </div>
+
+                <!-- 闭环降重进度 -->
+                <div class="loop-progress-panel" id="loopProgressPanel" style="display:none">
+                    <div class="loop-progress-header">
+                        <span class="loop-progress-title">闭环降重进行中</span>
+                        <button class="btn btn-stop" id="loopStopBtn">停止</button>
+                    </div>
+                    <div class="loop-progress-bar">
+                        <div class="loop-progress-fill" id="loopProgressFill"></div>
+                    </div>
+                    <div class="loop-progress-label" id="loopProgressLabel">正在初始检测...</div>
+                    <div class="loop-timeline" id="loopTimeline"></div>
                 </div>
 
                 <!-- 加载中 -->

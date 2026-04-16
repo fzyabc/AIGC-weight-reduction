@@ -13,6 +13,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from enum import Enum
 from typing import Optional
 
 # ============================================================
@@ -144,6 +145,71 @@ SYMMETRY_BREAKERS = [
     ('。{connector}', '；顺着这个思路，'),
     ('。{connector}', '。\n换个角度来说，'),
 ]
+
+
+# ============================================================
+# 多轮递进改写策略
+# ============================================================
+
+class RewriteStrategy(Enum):
+    """改写策略枚举，每轮闭环使用不同策略"""
+    STANDARD = 'standard'           # 标准改写
+    HIGH_VARIANCE = 'high_variance' # 大幅改变句子长度分布
+    STRUCTURAL = 'structural'       # 打乱信息顺序，改变因果链方向
+    MERGE_SPLIT = 'merge_split'     # 拆段或与相邻段合并
+    HUMANIZE = 'humanize'           # 注入人类独有内容引导
+
+
+# 每个策略对应的 system prompt 追加片段
+STRATEGY_PROMPT_FRAGMENTS = {
+    RewriteStrategy.STANDARD: '',  # 使用基础 SYSTEM_PROMPT
+
+    RewriteStrategy.HIGH_VARIANCE: (
+        '\n\n## 本轮重点：句长分布差异化\n'
+        '这段文字上一轮改写后仍然被检测为 AI 生成，原因是句子长度过于均匀。\n'
+        '你必须刻意制造句长差异：\n'
+        '- 必须有至少一个极短句（10字以内），如"这很关键。""问题在于此。"\n'
+        '- 必须有至少一个长复合句（40字以上），用"因为……所以……而且……"等嵌套结构\n'
+        '- 相邻两句的长度差距至少要达到 2 倍\n'
+        '- 不要让任何连续三句话的长度接近（差距<5字）\n'
+        '这比保持语句优美更重要——检测器靠句长方差来判断。'
+    ),
+
+    RewriteStrategy.STRUCTURAL: (
+        '\n\n## 本轮重点：信息顺序重组\n'
+        '这段文字已经被改写过但仍被检测为 AI，因为信息的排列顺序仍然遵循 AI 的"总分总"模式。\n'
+        '你必须：\n'
+        '- 把原文最后的结论/总结提到最前面说\n'
+        '- 把原文开头的背景铺垫移到中间作为补充说明\n'
+        '- 把"A 导致 B"改为"B 的出现，追溯其原因，是 A"\n'
+        '- 把并列的几个点按重要性倒序排列（把最不重要的放前面，最重要的放最后）\n'
+        '- 可以用插入语打断线性叙事，如"——这里需要说明的是——"\n'
+        '信息完整性不变，但叙述路径必须与原文完全不同。'
+    ),
+
+    RewriteStrategy.MERGE_SPLIT: (
+        '\n\n## 本轮重点：段落结构重组\n'
+        '这段文字经过多轮改写仍被检测，需要从段落结构层面打破模式。\n'
+        '你必须：\n'
+        '- 如果原文是一个长段，把它拆成 2-3 个短段落（用换行分隔）\n'
+        '- 如果原文包含多个并列论点，把前两点合成一句紧凑的话，第三点展开详细说\n'
+        '- 改变论证的"粒度"：把概括性的话展开成具体描述，把啰嗦的细节压缩成一句话\n'
+        '- 可以在段落中间插入一句转折性的短评\n'
+        '保持语义完整，但段落的节奏和密度必须变化。'
+    ),
+
+    RewriteStrategy.HUMANIZE: (
+        '\n\n## 本轮重点：人类写作痕迹\n'
+        '这段文字需要注入真实人类写作的痕迹来降低 AI 检测率。\n'
+        '你必须（至少做到 2 点）：\n'
+        '- 在论述中加入一个稍微犹豫/不确定的表达，如"大致可以认为""或许更准确的说法是"\n'
+        '- 用一个不太常见但准确的词替换一个常见词（不是故意用生僻词，而是选择更精确的同义词）\n'
+        '- 在某处加入一个带具体语境的例子引导，如"以XX领域的实践来看"\n'
+        '- 故意让某一句的表达不那么"完美"——比如稍微冗余、或者用口语化的连接词"而且""也就是"\n'
+        '- 句子之间可以有轻微的逻辑跳跃（人类写作中常见），不必每句都平滑过渡\n'
+        '核心：完美的文字=AI的文字。人类文字有"毛边"。'
+    ),
+}
 
 
 @dataclass
@@ -523,15 +589,73 @@ class AITransformer:
             restored = restored.replace(token, word)
         return restored
 
+    # 策略对应的温度递增
+    STRATEGY_TEMP = {
+        RewriteStrategy.STANDARD: 0.85,
+        RewriteStrategy.HIGH_VARIANCE: 0.92,
+        RewriteStrategy.STRUCTURAL: 0.95,
+        RewriteStrategy.MERGE_SPLIT: 0.98,
+        RewriteStrategy.HUMANIZE: 0.90,
+    }
+
+    def _build_statistical_prompt(self, paragraph: str,
+                                  detection_result=None,
+                                  round_num: int = 1,
+                                  strategy: 'RewriteStrategy' = None) -> str:
+        """
+        构建针对统计特征的增强 system prompt。
+        组合：基础 SYSTEM_PROMPT + 策略片段 + 检测反馈。
+        """
+        strategy = strategy or RewriteStrategy.STANDARD
+        base = self.SYSTEM_PROMPT
+
+        # 追加策略片段
+        fragment = STRATEGY_PROMPT_FRAGMENTS.get(strategy, '')
+        if fragment:
+            base += fragment
+
+        # 如果有检测结果，追加具体反馈
+        if detection_result is not None:
+            details = getattr(detection_result, 'details', {}) or {}
+            prob = getattr(detection_result, 'ai_probability', 0)
+            feedback_lines = [
+                f'\n\n## 检测反馈（第 {round_num} 轮）',
+                f'上一轮该段 AI 检测概率: {prob:.1f}%',
+            ]
+            # 如果检测 API 返回了具体指标，加入针对性提示
+            raw = details.get('raw', {})
+            if isinstance(raw, dict):
+                perplexity = raw.get('perplexity') or raw.get('average_perplexity')
+                burstiness = raw.get('burstiness')
+                if perplexity is not None:
+                    feedback_lines.append(f'困惑度(perplexity): {perplexity} — 需要提高文本的不可预测性')
+                if burstiness is not None:
+                    feedback_lines.append(f'突发性(burstiness): {burstiness} — 需要加大句子复杂度的变化幅度')
+            base += '\n'.join(feedback_lines)
+
+        return base
+
     def transform(self, text: str, risk_level: str = 'medium',
                   protected_words: Optional[list[str]] = None,
-                  custom_prompt: str = '') -> TransformResult:
-        """改写单段文本，支持术语保护和额外 AI 指令。"""
+                  custom_prompt: str = '',
+                  strategy: Optional['RewriteStrategy'] = None,
+                  detection_result=None,
+                  round_num: int = 1) -> TransformResult:
+        """
+        改写单段文本，支持术语保护、额外 AI 指令和多轮策略。
+
+        Args:
+            strategy: 改写策略（闭环模式用），None 则使用 STANDARD
+            detection_result: 上一轮检测结果（闭环模式用）
+            round_num: 当前闭环轮次
+        """
         if len(text.strip()) < 15:
             return TransformResult(
                 paragraph_index=-1, original=text, transformed=text,
                 rules_applied=[], change_ratio=0,
             )
+
+        strategy = strategy or RewriteStrategy.STANDARD
 
         intensity_hint = {
             'high': '【高风险段落】这段被判定AI概率>75%，需要大幅度重写——重新组织句子结构、更换表达方式、调整叙述顺序，但语义必须完全一致。',
@@ -539,15 +663,25 @@ class AITransformer:
             'low': '【低风险段落】AI概率30-50%，轻度调整即可——改几处关键表达，不需要大动。',
         }
 
-        # 根据风险等级动态调整 temperature
-        temp_map = {'high': 0.92, 'medium': 0.80, 'low': 0.65}
-        temp_override = temp_map.get(risk_level)
+        # 温度：策略优先 > 风险等级
+        temp_override = self.STRATEGY_TEMP.get(strategy, 0.85)
+        risk_temp = {'high': 0.92, 'medium': 0.80, 'low': 0.65}
+        temp_override = max(temp_override, risk_temp.get(risk_level, 0.80))
 
         protected_text, placeholder_map = self.protect_keywords(text, protected_words)
         user_msg = f"{intensity_hint.get(risk_level, '')}\n\n原文：\n{protected_text}"
 
+        # 构建增强 prompt（含策略片段和检测反馈）
+        stat_prompt = self._build_statistical_prompt(
+            paragraph=text,
+            detection_result=detection_result,
+            round_num=round_num,
+            strategy=strategy,
+        )
+
         call_result = self._call_api(user_msg, custom_prompt=custom_prompt,
-                                     temperature_override=temp_override)
+                                     temperature_override=temp_override,
+                                     system_prompt_override=stat_prompt)
         if not call_result.get('ok'):
             err = call_result.get('error', {})
             msg = err.get('message', 'unknown error')
@@ -564,6 +698,8 @@ class AITransformer:
         rules = [f'AI改写 ({self.model})']
         if placeholder_map:
             rules.insert(0, f'术语保护 × {len(placeholder_map)}')
+        if strategy != RewriteStrategy.STANDARD:
+            rules.append(f'策略: {strategy.value}')
         if custom_prompt.strip():
             rules.append('附加提示词')
 
@@ -579,16 +715,28 @@ class AITransformer:
     def batch_transform(self, paragraphs: dict[int, str],
                         risk_map: Optional[dict] = None,
                         protected_words: Optional[list[str]] = None,
-                        custom_prompt: str = '') -> list[TransformResult]:
-        """批量改写段落。采用串行调用，避免不必要的并发冲突。"""
+                        custom_prompt: str = '',
+                        strategy: Optional['RewriteStrategy'] = None,
+                        detection_results: Optional[dict] = None,
+                        round_num: int = 1) -> list[TransformResult]:
+        """
+        批量改写段落。采用串行调用，避免不必要的并发冲突。
+
+        Args:
+            detection_results: {段落索引: DetectionResult} 用于闭环模式的检测反馈
+        """
         results = []
         for idx, text in paragraphs.items():
             level = risk_map.get(idx, 'medium') if risk_map else 'medium'
+            det_result = detection_results.get(idx) if detection_results else None
             result = self.transform(
                 text,
                 level,
                 protected_words=protected_words,
                 custom_prompt=custom_prompt,
+                strategy=strategy,
+                detection_result=det_result,
+                round_num=round_num,
             )
             result.paragraph_index = idx
             results.append(result)
@@ -814,9 +962,10 @@ class AITransformer:
         return {'raw': raw}
 
     def _call_api(self, user_message: str, custom_prompt: str = '',
-                  temperature_override: Optional[float] = None) -> dict:
+                  temperature_override: Optional[float] = None,
+                  system_prompt_override: Optional[str] = None) -> dict:
         """调用 /chat/completions 接口并返回结构化结果。"""
-        system_prompt = self.SYSTEM_PROMPT
+        system_prompt = system_prompt_override or self.SYSTEM_PROMPT
         selected = _pick_dynamic_prompts(k=2, rng=self._rng)
         if selected:
             system_prompt = f"{system_prompt}\n\n动态写作指令：\n- " + "\n- ".join(selected)

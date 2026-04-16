@@ -29,9 +29,11 @@ from doc_handler import (
     get_content_paragraphs, analyze_document, ParagraphInfo,
 )
 from transformer import (
-    Transformer, TransformResult,
+    Transformer, TransformResult, AITransformer,
     get_strategy_description, analyze_ai_patterns,
 )
+from detector import AIGCDetector
+from loop_engine import LoopEngine, LoopConfig
 
 
 BANNER = r"""
@@ -57,6 +59,7 @@ def main():
   %(prog)s --doc 论文.docx --analyze-only          仅分析，不修改
   %(prog)s --doc 论文.docx --interactive           交互式逐段确认
   %(prog)s --doc 论文.docx --export-json map.json  导出替换映射
+  %(prog)s --doc 论文.docx --loop --detect-api-url URL --detect-api-key KEY --llm-api-url URL --llm-api-key KEY  闭环降重
         """,
     )
     parser.add_argument('--doc', required=True, help='输入的docx论文文件路径')
@@ -77,6 +80,24 @@ def main():
     parser.add_argument('--skip-english', action='store_true', default=True,
                         help='跳过英文段落（默认开启）')
 
+    # 闭环降重参数
+    parser.add_argument('--loop', action='store_true',
+                        help='启用多轮闭环降重模式（需配置检测API）')
+    parser.add_argument('--detect-api-url', help='AIGC检测API地址')
+    parser.add_argument('--detect-api-key', help='AIGC检测API密钥')
+    parser.add_argument('--detect-platform', default='custom',
+                        choices=['gptzero', 'custom', 'local'],
+                        help='检测平台预设：local=本地模型(免费), gptzero, custom（默认custom）')
+    parser.add_argument('--target-rate', type=float, default=15.0,
+                        help='闭环目标检测率%%（默认15）')
+    parser.add_argument('--max-rounds', type=int, default=5,
+                        help='闭环最大轮次（默认5）')
+    parser.add_argument('--llm-api-url',
+                        help='LLM API地址（OpenAI兼容格式）')
+    parser.add_argument('--llm-api-key', help='LLM API密钥')
+    parser.add_argument('--llm-model', default='gpt-4',
+                        help='LLM模型名称（默认gpt-4）')
+
     args = parser.parse_args()
 
     print(BANNER)
@@ -91,6 +112,10 @@ def main():
 
     if args.analyze_only:
         run_analyze_mode(args)
+        return
+
+    if args.loop:
+        run_loop_mode(args)
         return
 
     if args.report:
@@ -222,6 +247,108 @@ def run_scan_mode(args):
 
     print(f'发现 {len(targets)} 个段落需要降重处理\n')
     _apply_transforms(args, doc, paragraphs, targets, risk_map)
+
+
+def run_loop_mode(args):
+    """多轮闭环降重模式"""
+    print('🔄 闭环模式：多轮检测-改写循环降重...\n')
+
+    is_local = args.detect_platform == 'local'
+
+    if not is_local and (not args.detect_api_url or not args.detect_api_key):
+        print('❌ 闭环模式需要检测API，请指定 --detect-api-url 和 --detect-api-key')
+        print('   或使用 --detect-platform local 启用免费本地模型检测')
+        sys.exit(1)
+
+    if not args.llm_api_url or not args.llm_api_key:
+        print('❌ 闭环模式需要LLM API，请指定 --llm-api-url 和 --llm-api-key')
+        sys.exit(1)
+
+    doc, paragraphs = read_docx(args.doc)
+    stats = analyze_document(paragraphs)
+    print(f'文档: {stats["content_paragraphs"]} 个正文段落, {stats["total_words"]} 字\n')
+
+    # 构建检测器
+    detect_config = {'platform': args.detect_platform}
+    if not is_local:
+        detect_config['api_url'] = args.detect_api_url
+        detect_config['api_key'] = args.detect_api_key
+    detector = AIGCDetector(detect_config)
+
+    conn = detector.test_connection()
+    if not conn['ok']:
+        print(f'❌ 检测API连接失败: {conn["message"]}')
+        sys.exit(1)
+    print(f'✅ 检测API连接成功: {conn["message"]}\n')
+
+    # 构建AI改写器
+    ai_transformer = AITransformer(
+        api_url=args.llm_api_url,
+        api_key=args.llm_api_key,
+        model=args.llm_model,
+    )
+
+    # 提取正文段落文本
+    content = get_content_paragraphs(paragraphs)
+    para_texts = []
+    para_indices = []
+    for para in content:
+        if para.word_count < args.min_length:
+            continue
+        if args.skip_english and _is_english(para.text):
+            continue
+        if args.skip_headings and para.is_heading:
+            continue
+        para_texts.append(para.text)
+        para_indices.append(para.index)
+
+    if not para_texts:
+        print('✅ 无需处理的正文段落。')
+        return
+
+    config = LoopConfig(
+        max_rounds=args.max_rounds,
+        target_rate=args.target_rate,
+    )
+
+    engine = LoopEngine(detector, ai_transformer, config)
+
+    def progress_cb(round_num, total_rounds, current_rate, msg):
+        bar = f'[{"█" * round_num}{"░" * (total_rounds - round_num)}]'
+        print(f'  {bar} {msg}  (当前检测率: {current_rate:.1f}%)')
+
+    print(f'开始闭环降重 (目标: {args.target_rate}%, 最大轮次: {args.max_rounds})\n')
+    history = engine.run(para_texts, progress_callback=progress_cb)
+
+    # 将改写结果写回文档
+    for i, idx in enumerate(para_indices):
+        if i < len(para_texts):
+            replace_paragraph_text(doc, idx, para_texts[i])
+
+    output_path = args.output
+    if not output_path:
+        stem = Path(args.doc).stem
+        suffix = Path(args.doc).suffix
+        output_path = str(Path(args.doc).parent / f'{stem}_降重版{suffix}')
+
+    save_docx(doc, output_path)
+
+    # 打印结果摘要
+    print(f'\n{"="*60}')
+    print(f'✅ 闭环降重完成!')
+    if history:
+        first_rate = history[0].rate_before
+        final_rate = history[-1].rate_after
+        print(f'   初始检测率: {first_rate:.1f}%')
+        print(f'   最终检测率: {final_rate:.1f}%')
+        print(f'   总轮次:     {len(history)}')
+        for rr in history:
+            print(f'     第{rr.round_num}轮: {rr.rate_before:.1f}% → {rr.rate_after:.1f}%'
+                  f'  (改写{rr.paragraphs_rewritten}段, 策略={rr.strategy.value})')
+    else:
+        print(f'   文档检测率已低于目标，无需改写')
+    print(f'   输出文件:   {output_path}')
+    print(f'{"="*60}\n')
 
 
 def _apply_transforms(args, doc, paragraphs, targets, risk_map):

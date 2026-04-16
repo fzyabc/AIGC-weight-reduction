@@ -1028,3 +1028,167 @@ input[type="checkbox"] {
     .stats-bar { flex-wrap: wrap; }
     .stat-card { min-width: 100px; }
 }
+
+/* ============================================================
+   Detection Config & Loop Reduce
+   ============================================================ */
+
+.detect-num {
+    background: var(--orange-bg) !important;
+    color: var(--orange) !important;
+}
+
+.detect-config {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.detect-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.btn-loop {
+    background: var(--orange);
+    border-color: var(--orange);
+    color: #000;
+    font-weight: 600;
+}
+.btn-loop:hover:not(:disabled) {
+    background: #d97706;
+}
+
+.btn-stop {
+    background: var(--red);
+    color: #fff;
+    border: none;
+    font-size: 12px;
+    padding: 4px 12px;
+}
+.btn-stop:hover {
+    background: #dc2626;
+}
+
+.loop-progress-panel {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+}
+
+.loop-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.loop-progress-title {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: var(--text);
+}
+
+.loop-progress-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-input);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.loop-progress-fill {
+    height: 100%;
+    background: var(--orange);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.loop-progress-label {
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+}
+
+.loop-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.loop-round-card {
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.85rem;
+}
+
+.loop-round-card .round-label {
+    font-weight: 600;
+    color: var(--text);
+    margin-right: 8px;
+}
+
+.loop-round-card .round-strategy {
+    color: var(--text-dim);
+    font-size: 0.78rem;
+}
+
+.loop-round-card .round-rate {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 0.85rem;
+}
+
+.loop-round-card .rate-before {
+    color: var(--red);
+    text-decoration: line-through;
+}
+
+.loop-round-card .rate-after {
+    color: var(--green);
+    font-weight: 600;
+}
+
+.loop-result-summary {
+    margin-bottom: 16px;
+    padding: 16px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+.loop-result-summary h3 {
+    margin: 0 0 12px;
+    font-size: 1rem;
+    color: var(--text);
+}
+
+.loop-result-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.loop-result-stats .stat-card {
+    flex: 1;
+}
+
+.loop-history-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.green { color: var(--green); }
